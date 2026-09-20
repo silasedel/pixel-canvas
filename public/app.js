@@ -448,7 +448,11 @@
   canvas.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     canvas.setPointerCapture(e.pointerId);
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (e.pointerType === 'mouse') {
+      // A mouse has one pointer; drop any stale entry so it can never look like a pinch.
+      for (const [id, p] of pointers) if (p.type === 'mouse') pointers.delete(id);
+    }
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
     if (pointers.size === 2) {
       if (drawing) endStroke();
       panning = null;
