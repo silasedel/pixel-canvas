@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>Pixel Canvas</title>
-  <meta name="description" content="One massive shared canvas. Anyone with the link can draw on it live." />
+  <meta name="description" content="A massive shared canvas with 256 regions that each change how you draw. Anyone with the link can draw on it live." />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111'/%3E%3Cpath d='M8 22c3-6 6-9 9-9s3 6 6 6 3-3 3-3' fill='none' stroke='%23ff5c8a' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -15,6 +15,9 @@
     <div class="group" id="tools">
       <button class="tool" data-tool="pen" title="Pen (P)" aria-label="Pen">
         <svg viewBox="0 0 24 24"><path d="M3 21l3.5-.9L19 7.6a2 2 0 0 0 0-2.8l-.8-.8a2 2 0 0 0-2.8 0L3.9 16.5 3 21z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M13 6.5l4.5 4.5" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+      <button class="tool" data-tool="spray" title="Spray can (S)" aria-label="Spray can">
+        <svg viewBox="0 0 24 24"><path d="M7 9h8v12H7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 9V6h4v3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="4" r="1" fill="currentColor"/><circle cx="20.5" cy="7" r="1" fill="currentColor"/><circle cx="18" cy="10" r="1" fill="currentColor"/><circle cx="21" cy="3" r=".7" fill="currentColor"/></svg>
       </button>
       <button class="tool" data-tool="eraser" title="Eraser (E)" aria-label="Eraser">
         <svg viewBox="0 0 24 24"><path d="M4 16.5l8.5-8.5a2 2 0 0 1 2.8 0l4.2 4.2a2 2 0 0 1 0 2.8L14 20.5H9L4 15.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 20.5h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 12.5l6 6" stroke="currentColor" stroke-width="2"/></svg>
@@ -27,7 +30,7 @@
     <div class="group" id="colors"></div>
     <label class="custom-color" title="Custom color">
       <input type="color" id="colorPicker" value="#1a1a1a" aria-label="Custom color" />
-      <span class="rainbow"></span>
+      <span class="picker-icon">+</span>
     </label>
     <div class="sep"></div>
     <div class="group" id="sizes"></div>
@@ -39,32 +42,55 @@
     </div>
   </div>
 
-  <div id="status" class="panel">
-    <span id="statusDot" class="dot"></span>
-    <span id="statusText">Connecting…</span>
-    <span class="sep"></span>
-    <span id="users">–</span> online
+  <div id="left">
+    <button id="regionPill" class="panel" title="Open the world map (M)">
+      <span id="regionName">…</span>
+      <span id="regionFx"></span>
+    </button>
+    <div id="status" class="panel">
+      <span id="statusDot" class="dot"></span>
+      <span id="statusText">Connecting…</span>
+      <span class="sep"></span>
+      <span id="users">–</span> online
+    </div>
   </div>
 
   <div id="zoomPanel" class="panel">
+    <button id="mapBtn" title="World map (M)" aria-label="World map">
+      <svg viewBox="0 0 24 24"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="2"/></svg>
+    </button>
+    <button id="randomBtn" title="Teleport somewhere random (R)" aria-label="Random teleport">
+      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="1.4" fill="currentColor"/><circle cx="15" cy="15" r="1.4" fill="currentColor"/><circle cx="15" cy="9" r="1.4" fill="currentColor"/><circle cx="9" cy="15" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>
+    </button>
+    <span class="sep"></span>
     <button id="zoomOut" title="Zoom out (−)" aria-label="Zoom out">−</button>
     <button id="zoomLabel" title="Reset to 100% (0)">100%</button>
     <button id="zoomIn" title="Zoom in (+)" aria-label="Zoom in">+</button>
-    <button id="fitBtn" title="Show the whole canvas" aria-label="Show whole canvas">
+    <button id="fitBtn" title="See this whole region (F)" aria-label="See this whole region">
       <svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
     <button id="helpBtn" title="Help" aria-label="Help">?</button>
   </div>
 
+  <div id="map" class="panel hidden">
+    <div class="map-head">
+      <h2>World map</h2>
+      <span id="mapCaption">256 regions. Click one to teleport.</span>
+      <button id="mapClose" aria-label="Close">×</button>
+    </div>
+    <div id="mapGrid"></div>
+    <div id="mapLegend"></div>
+  </div>
+
   <div id="help" class="panel hidden">
     <h2>Pixel Canvas</h2>
-    <p>One huge canvas shared with everyone who has the link. Whatever you draw, everyone sees instantly, and it stays there.</p>
+    <p>A gigantic canvas shared with everyone who has the link. It is split into 256 regions, and every region changes how drawing works: some glow, some mirror, some drip, some wash away. Whatever you draw, everyone sees instantly, and it stays.</p>
     <table>
-      <tr><td>Draw</td><td>Click or touch and drag</td></tr>
-      <tr><td>Pan</td><td>Scroll, hand tool, Space + drag, or middle / right drag</td></tr>
-      <tr><td>Zoom</td><td>Ctrl / ⌘ + scroll, pinch, or the + / − keys</td></tr>
+      <tr><td>Draw</td><td>Click or touch and drag. S for the spray can, P for the pen</td></tr>
+      <tr><td>Pan</td><td>Scroll, hand tool (H), Space + drag, or middle / right drag</td></tr>
+      <tr><td>Zoom</td><td>Ctrl / ⌘ + scroll, pinch, or the + / − keys. F shows the whole region</td></tr>
+      <tr><td>Travel</td><td>M opens the world map, R teleports somewhere random</td></tr>
       <tr><td>Undo</td><td>Ctrl / ⌘ + Z removes your last stroke</td></tr>
-      <tr><td>Tools</td><td>P pen, E eraser, H hand, [ and ] change size</td></tr>
       <tr><td>Share</td><td>Copy the URL to bring others to this exact spot</td></tr>
     </table>
     <button id="helpClose">Got it</button>
