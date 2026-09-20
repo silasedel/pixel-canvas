@@ -29,6 +29,17 @@
   ];
   const TILE_BYTES_CAP = 90000;
   const DEAD_CAP = 250;
+  // Anyone can publish to the public brokers, so treat every inbound message as
+  // hostile: bound what one sender can make this tab allocate, paint or animate.
+  const ACTIVE_TIMEOUT = 12000; // an unfinished stroke that stops arriving is dropped
+  const ACTIVE_PER_USER = 3;
+  const ACTIVE_TOTAL = 40;
+  const MAX_MOVE_POINTS = 600; // coordinate pairs accepted from one move message
+  const MAX_TILE_STROKES = 4000;
+  const MAX_PEERS = 400;
+  const MAX_CURSORS = 200;
+  const RATE_BURST = 140;
+  const RATE_REFILL = 70; // messages per second, per sender
 
   const COL = {
     space: '#05070d',
@@ -1124,6 +1135,8 @@ void main() {
       t: Date.now(),
       points: [Math.round(m.x * 10) / 10, Math.round(m.y * 10) / 10],
       in: new Set(),
+      user: myId,
+      seen: Date.now(),
     };
     activeStrokes.set(id, s);
     drawing = { s, pending: [], lastX: m.x, lastY: m.y, ox: m.x, oy: m.y };
@@ -1548,16 +1561,22 @@ void main() {
   const COLOR_RE = /^#[0-9a-f]{6}$/i;
   function unpackStroke(o) {
     if (!o || typeof o.i !== 'string' || o.i.length > 40 || !Array.isArray(o.p)) return null;
+    if (o.p.length > MAX_POINTS * 2 + 2) return null;
     const pts = unpackPoints(o.p.filter((v) => typeof v === 'number' && Number.isFinite(v)));
     if (pts.length < 2 || pts.length > MAX_POINTS * 2) return null;
     let minX = Infinity;
     let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
     for (let i = 0; i < pts.length; i += 2) {
       if (pts[i] < minX) minX = pts[i];
       if (pts[i] > maxX) maxX = pts[i];
+      if (pts[i + 1] < minY) minY = pts[i + 1];
+      if (pts[i + 1] > maxY) maxY = pts[i + 1];
     }
     const cs = Math.max(0.05, Math.cos(yToLat(clamp(pts[1], 0, MH))));
-    if ((maxX - minX) * cs > MAX_SPAN * 2.4) return null;
+    // Same two-axis reach limit the local pen obeys: nothing may span the planet.
+    if ((maxX - minX) * cs > MAX_SPAN * 2.4 || maxY - minY > MAX_SPAN * 2.4) return null;
     const shift = Math.floor(pts[0] / MW) * MW;
     if (shift) for (let i = 0; i < pts.length; i += 2) pts[i] -= shift;
     return {
@@ -1574,7 +1593,7 @@ void main() {
   function schedulePublish(key) {
     const r = rec(key);
     if (r.pubTimer) return;
-    const wait = Math.max(500, 1800 - (performance.now() - r.lastPub));
+    const wait = Math.max(500, 1800 - (performance.now() - r.lastPub)) + Math.random() * 1400;
     r.pubTimer = setTimeout(() => {
       r.pubTimer = null;
       publishCell(key);
@@ -1596,6 +1615,7 @@ void main() {
       payload = JSON.stringify(body);
     }
     r.lastPub = performance.now();
+    if (payload === r.lastPayload) return; // the brokers already hold this exact state
     r.lastPayload = payload;
     if (!publish(TILE_TOPIC(key), payload, { qos: 1, retain: true })) setTimeout(() => schedulePublish(key), 4000);
   }
@@ -1612,16 +1632,21 @@ void main() {
     if (!body || !Array.isArray(body.s)) return;
     r.lastPayload = payload;
     let republish = false;
-    if (typeof body.m === 'number' && body.m > r.min) r.min = body.m;
+    // A watermark is only ever "strokes older than this were dropped when the
+    // cell filled up". One dated in the future is nonsense, so ignore it.
+    if (typeof body.m === 'number' && body.m > r.min && body.m <= Date.now() + 60000) r.min = body.m;
     if (Array.isArray(body.d)) {
-      for (const id of body.d) {
-        if (typeof id !== 'string') continue;
+      for (const id of body.d.slice(0, DEAD_CAP * 2)) {
+        if (typeof id !== 'string' || id.length > 40) continue;
         if (!r.dead.has(id)) tombstone(r, id);
-        if (strokes.has(id)) removeStroke(id);
+        // A tombstone only speaks for the cell it arrived in; it cannot reach
+        // across the planet and delete a stroke filed somewhere else.
+        const victim = strokes.get(id);
+        if (victim && victim.cell === key) removeStroke(id);
       }
     }
     const seen = new Set();
-    for (const o of body.s) {
+    for (const o of body.s.slice(0, MAX_TILE_STROKES)) {
       const s = unpackStroke(o);
       if (!s) continue;
       if (r.dead.has(s.id) || s.t < r.min) {
@@ -1645,6 +1670,76 @@ void main() {
       }
     }
     if (republish) schedulePublish(key);
+    else if (r.pubTimer) {
+      // Someone else already published state we agree with, so stand down
+      // instead of every client echoing the same reconciliation.
+      clearTimeout(r.pubTimer);
+      r.pubTimer = null;
+    }
+  }
+
+  // Token bucket per sender. A person drawing hard sends ~25 messages a second;
+  // a flood gets clipped to RATE_REFILL and stops costing us paint work.
+  const buckets = new Map();
+  const COST = { start: 3, move: 1, end: 4, remove: 4, cursor: 1, hello: 1 };
+  function allowLive(u, kind) {
+    const now = performance.now();
+    let b = buckets.get(u);
+    if (!b) {
+      if (buckets.size >= MAX_PEERS) return false;
+      b = { tokens: RATE_BURST, last: now };
+      buckets.set(u, b);
+    }
+    b.tokens = Math.min(RATE_BURST, b.tokens + ((now - b.last) / 1000) * RATE_REFILL);
+    b.last = now;
+    const cost = COST[kind] || 2;
+    if (b.tokens < cost) return false;
+    b.tokens -= cost;
+    return true;
+  }
+
+  function dropActive(s) {
+    if (!activeStrokes.delete(s.id)) return;
+    const bb = strokeBBox(s);
+    for (const v of [overview, detail]) if (v.valid) repaintArtRect(v, bb.x0, bb.y0, bb.x1, bb.y1);
+  }
+
+  // A tab that closes mid-stroke never sends an end, so without this the stroke
+  // would live forever and keep the render loop awake.
+  function sweepActive() {
+    const cut = Date.now() - ACTIVE_TIMEOUT;
+    let dropped = false;
+    for (const s of [...activeStrokes.values()]) {
+      if (drawing && drawing.s.id === s.id) continue;
+      if ((s.seen || s.t) < cut) {
+        dropActive(s);
+        dropped = true;
+      }
+    }
+    for (const [u, b] of buckets) if (performance.now() - b.last > 120000) buckets.delete(u);
+    if (dropped) requestRender();
+  }
+  setInterval(sweepActive, 3000);
+
+  function admitActive(s) {
+    let ownCount = 0;
+    let oldestOwn = null;
+    for (const a of activeStrokes.values()) {
+      if (a.user !== s.user) continue;
+      ownCount++;
+      if (!oldestOwn || (a.seen || a.t) < (oldestOwn.seen || oldestOwn.t)) oldestOwn = a;
+    }
+    if (ownCount >= ACTIVE_PER_USER && oldestOwn) dropActive(oldestOwn);
+    while (activeStrokes.size >= ACTIVE_TOTAL) {
+      let oldest = null;
+      for (const a of activeStrokes.values()) {
+        if (drawing && drawing.s.id === a.id) continue;
+        if (!oldest || (a.seen || a.t) < (oldest.seen || oldest.t)) oldest = a;
+      }
+      if (!oldest) break;
+      dropActive(oldest);
+    }
+    activeStrokes.set(s.id, s);
   }
 
   function onLive(payload) {
@@ -1660,21 +1755,28 @@ void main() {
     seenLive.add(key);
     seenLiveList.push(key);
     while (seenLiveList.length > 4000) seenLive.delete(seenLiveList.shift());
-    users.set(m.u, performance.now());
+    if (!allowLive(m.u, m.t)) return;
+    if (users.size < MAX_PEERS || users.has(m.u)) users.set(m.u, performance.now());
     switch (m.t) {
       case 'start': {
         const s = unpackStroke({ i: m.id, c: m.c, w: m.w, e: m.e, k: m.k, t: Date.now(), p: packPoints(Array.isArray(m.p) ? m.p.slice(0, 2) : []) });
         if (!s || !s.id.startsWith(`${m.u}-`)) return;
         s.in = new Set();
-        activeStrokes.set(s.id, s);
+        s.user = m.u;
+        s.seen = Date.now();
+        admitActive(s);
         liveDrawSegment(s, s.points);
         requestRender();
         break;
       }
       case 'move': {
         const s = activeStrokes.get(m.id);
-        if (!s || !Array.isArray(m.p) || s.points.length >= MAX_POINTS * 2) return;
-        for (let i = 0; i + 1 < m.p.length; i += 2) {
+        if (!s || !Array.isArray(m.p) || s.user !== m.u) return;
+        s.seen = Date.now();
+        const budget = Math.min(MAX_MOVE_POINTS, (MAX_POINTS * 2 - s.points.length) / 2);
+        if (budget <= 0) return;
+        const end = Math.min(m.p.length, budget * 2);
+        for (let i = 0; i + 1 < end; i += 2) {
           const x = m.p[i];
           const y = m.p[i + 1];
           if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) continue;
@@ -1706,7 +1808,7 @@ void main() {
         }
         break;
       case 'cursor':
-        if (typeof m.x === 'number' && typeof m.y === 'number') {
+        if (typeof m.x === 'number' && typeof m.y === 'number' && (cursors.size < MAX_CURSORS || cursors.has(m.u))) {
           cursors.set(m.u, { x: m.x, y: m.y, c: COLOR_RE.test(m.c) ? m.c : '#111318', t: performance.now() });
           requestRender();
         }
@@ -2004,6 +2106,11 @@ void main() {
     get view() { return curView === overview ? 'overview' : 'detail'; },
     cam,
     forceFrame: frame,
+    get active() { return activeStrokes.size; },
+    get cursors() { return cursors.size; },
+    get activePoints() { return [...activeStrokes.values()].map((a) => a.points.length / 2); },
+    strokeCell: (id) => { const x = strokes.get(id); return x && x.cell; },
+    lastStroke: () => [...strokes.keys()].pop(),
     places: PLACES,
     travelTo,
     setZoom,

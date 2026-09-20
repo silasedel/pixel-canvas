@@ -35,6 +35,17 @@ There is no server of its own. The site is three static files on GitHub Pages, a
 - **Live drawing** streams on one topic (`pixelcanvas/v3/live`) as `start`, `move` and `end` messages, plus cursors and a heartbeat. Every message goes to all three brokers and is de-duplicated on arrival, so the world works as long as any one broker is up.
 - **Persistence** uses retained messages. The planet is split into a 16 × 8 grid of storage cells, each one retained message (`pixelcanvas/v3/tile/<x>_<y>`). Clients subscribe to all of them, so you always see the whole world from orbit. Finishing a stroke republishes its cell; every client merges what it receives with what it knows and republishes the union, and undo writes a tombstone so a removed stroke does not come back. Each cell is capped at about 90 KB; past that the oldest strokes in that cell are forgotten.
 
+## What the brokers can and cannot protect
+
+The brokers are public and anonymous, so anything a browser can publish, anyone can publish. The client treats every inbound message as hostile and bounds what one sender can make your tab do:
+
+- Unfinished strokes expire after 12 seconds, are capped at 3 per sender and 40 overall, and no longer keep the animation loop awake forever when someone closes their tab mid-stroke.
+- Each sender gets a token bucket of 70 messages a second; one move message can add at most 600 points, and a stroke can never exceed the point or reach limits the local pen obeys, on either axis.
+- A tombstone only deletes strokes filed in the cell it arrived in, and a cell's "old strokes were dropped" watermark is ignored if it is dated in the future.
+- Once one client publishes a reconciled cell, the others cancel their queued copies instead of all echoing it, and publishes are jittered.
+
+What this design cannot do is prove who drew what. There is no server and no authentication, so a determined person can forge a delete for someone else's stroke. That matters less than it sounds: this is an open canvas where any visitor can already erase anything with the eraser. Binding strokes to authors would need a real backend, which would mean an account to run and pay for. If the planet ever needs protected artwork, that is the change to make.
+
 ## Run it locally
 
 Any static file server works, for example:
