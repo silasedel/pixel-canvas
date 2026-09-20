@@ -11,13 +11,14 @@ A shared planet. Anyone with the link can spin it, drop down to the surface and 
 - **You can only draw close to the surface**, under about 1,200 km across. Zoomed out you can look but not touch, so nobody can scribble a line across a continent
 - Pen, spray can, eraser, twelve colors plus rainbow ink and a custom picker, five brush sizes, and undo
 - Live cursors, an online counter, and a flat map (M) you can click to travel anywhere
+- A brush ring on the cursor showing exactly where your mark will land and how big it will be
 - The URL carries where you are looking, so sharing it drops people on the same spot
 
 ## Controls
 
 | Action | How |
 | --- | --- |
-| Spin | Drag the planet, or the arrow keys |
+| Spin | Drag the planet. Whatever you grab stays under your cursor. Arrow keys work too |
 | Zoom | Scroll, pinch, or the + and − keys. 0 pulls back to the whole planet |
 | Draw | Only near the surface. P pen, S spray can, E eraser, `[` and `]` change size |
 | Travel | M opens the flat map, R drops you somewhere random |
@@ -29,6 +30,7 @@ There is no server of its own. The site is three static files on GitHub Pages, a
 
 - **The planet** is generated from a fixed seed: continents are unions of wobbly spherical blobs, so coastlines are real polygons that stay crisp at any zoom and every client draws an identical world without downloading a map.
 - **The globe** is drawn in WebGL. A sphere mesh is projected orthographically in the vertex shader, and the fragment shader samples an equirectangular texture. Two textures are kept: one of the whole world, updated as strokes arrive, and one covering just the patch you are looking at, rebuilt when you move. That is what keeps a planet-sized canvas sharp when you are 50 km above it.
+- **Camera moves** are solved directly rather than nudged. Dragging works out the rotation that puts the grabbed point exactly under the cursor, so the planet never drifts or swings. Zooming toward the cursor is faded out as you pull back, because on a globe it means rotating, which looks like a lurch when the whole planet is on screen; far out, zoom simply stays centred.
 - **Strokes** are vector data in map units, stored as `{ id, color, size, erase, t, points }` with points delta-encoded. Because the projection stretches longitude, the brush is widened by `1 / cos(latitude)` when painting, so a round pen stays round once it is on the sphere.
 - **Live drawing** streams on one topic (`pixelcanvas/v3/live`) as `start`, `move` and `end` messages, plus cursors and a heartbeat. Every message goes to all three brokers and is de-duplicated on arrival, so the world works as long as any one broker is up.
 - **Persistence** uses retained messages. The planet is split into a 16 × 8 grid of storage cells, each one retained message (`pixelcanvas/v3/tile/<x>_<y>`). Clients subscribe to all of them, so you always see the whole world from orbit. Finishing a stroke republishes its cell; every client merges what it receives with what it knows and republishes the union, and undo writes a tombstone so a removed stroke does not come back. Each cell is capped at about 90 KB; past that the oldest strokes in that cell are forgotten.

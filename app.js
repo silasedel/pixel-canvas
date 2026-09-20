@@ -597,6 +597,7 @@
   let H = 1;
   let dpr = 1;
   const cam = { lon: -0.3, lat: 0.35, R: 300 };
+  const hover = { x: 0, y: 0, on: false, touch: false };
   const state = { tool: 'pen', color: PALETTE[0], sizeIdx: 1 };
 
   const Rcover = () => 0.5 * Math.hypot(W, H);
@@ -1017,6 +1018,33 @@ void main() {
       octx.strokeStyle = 'rgba(255,255,255,0.9)';
       octx.stroke();
     }
+
+    drawBrushRing();
+  }
+
+  // Shows exactly where the next mark lands and how big it will be.
+  function drawBrushRing() {
+    if (!hover.on || hover.touch || spin || pinch) return;
+    if (state.tool === 'hand' || !canDraw()) return;
+    const r = Math.max(3.5, SIZE_PX[state.sizeIdx] / 2);
+    octx.save();
+    octx.beginPath();
+    octx.arc(hover.x, hover.y, r + 1, 0, TAU);
+    octx.lineWidth = 3;
+    octx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    if (state.tool === 'eraser') octx.setLineDash([5, 4]);
+    octx.stroke();
+    octx.beginPath();
+    octx.arc(hover.x, hover.y, r + 1, 0, TAU);
+    octx.lineWidth = 1.25;
+    octx.strokeStyle = state.tool === 'eraser' ? 'rgba(20,24,30,0.85)' : state.color === 'rainbow' ? '#f43f5e' : state.color;
+    octx.stroke();
+    octx.setLineDash([]);
+    octx.beginPath();
+    octx.arc(hover.x, hover.y, 1.1, 0, TAU);
+    octx.fillStyle = 'rgba(20, 24, 30, 0.7)';
+    octx.fill();
+    octx.restore();
   }
 
   // ============================================================== render loop
@@ -1192,6 +1220,59 @@ void main() {
   let pinch = null;
   let spaceDown = false;
 
+  // Rotate the planet so world point P lands exactly at screen (sx, sy).
+  // Solved directly instead of nudged, so the globe tracks the cursor
+  // instead of drifting and swinging around.
+  function anchorTo(P, sx, sy) {
+    if (!P) return false;
+    let tx = (sx - W / 2) / cam.R;
+    let ty = -(sy - H / 2) / cam.R;
+    const len = Math.hypot(tx, ty);
+    if (len > 0.999) {
+      tx = (tx / len) * 0.999;
+      ty = (ty / len) * 0.999;
+    }
+    const cl0 = Math.cos(P.lat);
+    const vx = cl0 * Math.sin(P.lon);
+    const vy = Math.sin(P.lat);
+    const vz = cl0 * Math.cos(P.lon);
+    let lon0 = cam.lon;
+    const r1 = Math.hypot(vx, vz);
+    if (r1 > 1e-6) {
+      const phi = Math.atan2(-vz, vx);
+      const d = Math.acos(clamp(tx / r1, -1, 1));
+      const a = phi + d;
+      const b = phi - d;
+      lon0 = Math.abs(wrapPi(a - cam.lon)) <= Math.abs(wrapPi(b - cam.lon)) ? a : b;
+    }
+    const cl = Math.cos(lon0);
+    const sl = Math.sin(lon0);
+    const z1 = sl * vx + cl * vz;
+    const r2 = Math.hypot(vy, z1);
+    let lat0 = cam.lat;
+    if (r2 > 1e-6) {
+      const phi = Math.atan2(-z1, vy);
+      const d = Math.acos(clamp(ty / r2, -1, 1));
+      const opts = [phi + d, phi - d].map(wrapPi);
+      const near = opts.filter((b) => Math.sin(b) * vy + Math.cos(b) * z1 > 0);
+      const pick = (near.length ? near : opts).reduce(
+        (best, b) => (Math.abs(wrapPi(b - cam.lat)) < Math.abs(wrapPi(best - cam.lat)) ? b : best),
+        (near.length ? near : opts)[0]
+      );
+      lat0 = pick;
+    }
+    cam.lon = wrapPi(lon0);
+    cam.lat = clamp(lat0, -PI / 2, PI / 2);
+    requestRender();
+    return true;
+  }
+
+  // Zooming toward the cursor means rotating, which reads as the planet
+  // lurching when the whole globe is on screen. Fade it in as you get close.
+  function anchorBlend() {
+    return clamp((cam.R / Rcover() - 0.9) / 2.5, 0, 1);
+  }
+
   function rotateBy(dx, dy) {
     cam.lon -= dx / (cam.R * Math.max(0.2, Math.cos(cam.lat)));
     cam.lat = clamp(cam.lat + dy / cam.R, -PI / 2, PI / 2);
@@ -1200,16 +1281,13 @@ void main() {
   }
 
   function setZoom(R, ax, ay) {
-    const before = ax !== undefined ? unproject(ax, ay) : null;
+    const P = ax !== undefined ? unproject(ax, ay) : null;
     cam.R = clamp(R, Rmin(), Rmax());
-    if (before) {
-      for (let i = 0; i < 4; i++) {
-        const p = project(before.lon, before.lat);
-        if (p.z <= 0) break;
-        const dx = ax - p.x;
-        const dy = ay - p.y;
-        if (Math.abs(dx) < 0.3 && Math.abs(dy) < 0.3) break;
-        rotateBy(-dx, -dy);
+    if (P) {
+      const b = anchorBlend();
+      if (b > 0.02) {
+        const now = project(P.lon, P.lat);
+        anchorTo(P, now.x + (ax - now.x) * b, now.y + (ay - now.y) * b);
       }
     }
     requestRender();
@@ -1233,12 +1311,14 @@ void main() {
       if (drawing) endStroke();
       spin = null;
       const [a, b] = [...pointers.values()];
-      pinch = { d0: Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1), R0: cam.R, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+      const mx0 = (a.x + b.x) / 2;
+      const my0 = (a.y + b.y) / 2;
+      pinch = { d0: Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1), R0: cam.R, mx: mx0, my: my0, grab: unproject(mx0, my0) };
       return;
     }
     if (pointers.size > 2) return;
     if (wantsPan(e)) {
-      spin = { x: e.clientX, y: e.clientY };
+      spin = { x: e.clientX, y: e.clientY, grab: unproject(e.clientX, e.clientY) };
       glCanvas.classList.add('grabbing');
       if (!canDraw() && e.button === 0 && state.tool !== 'hand') hintZoom();
       return;
@@ -1248,6 +1328,11 @@ void main() {
   });
 
   glCanvas.addEventListener('pointermove', (e) => {
+    hover.x = e.clientX;
+    hover.y = e.clientY;
+    hover.touch = e.pointerType === 'touch';
+    if (!hover.on) hover.on = true;
+    requestRender();
     const pt = pointers.get(e.pointerId);
     if (pt) {
       pt.x = e.clientX;
@@ -1258,15 +1343,21 @@ void main() {
         const [a, b] = [...pointers.values()];
         const mx = (a.x + b.x) / 2;
         const my = (a.y + b.y) / 2;
-        rotateBy(mx - pinch.mx, my - pinch.my);
+        cam.R = clamp(pinch.R0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0), Rmin(), Rmax());
+        const b2 = anchorBlend();
+        if (!pinch.grab || b2 < 0.02 || !anchorTo(pinch.grab, mx, my)) {
+          rotateBy(mx - pinch.mx, my - pinch.my);
+        }
         pinch.mx = mx;
         pinch.my = my;
-        setZoom(pinch.R0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0));
+        requestRender();
       }
       return;
     }
     if (spin && pt) {
-      rotateBy(e.clientX - spin.x, e.clientY - spin.y);
+      if (!spin.grab || !anchorTo(spin.grab, e.clientX, e.clientY)) {
+        rotateBy(e.clientX - spin.x, e.clientY - spin.y);
+      }
       spin.x = e.clientX;
       spin.y = e.clientY;
       return;
@@ -1294,6 +1385,10 @@ void main() {
   glCanvas.addEventListener('pointerup', pointerEnd);
   glCanvas.addEventListener('pointercancel', pointerEnd);
   glCanvas.addEventListener('lostpointercapture', pointerEnd);
+  glCanvas.addEventListener('pointerleave', () => {
+    hover.on = false;
+    requestRender();
+  });
   glCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   glCanvas.addEventListener(
