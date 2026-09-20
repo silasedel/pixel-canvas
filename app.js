@@ -14,6 +14,21 @@
   ];
   const SIZES = [2, 5, 10, 20, 40];
 
+  // Storage: the canvas is persisted as one retained MQTT message per 1024-unit tile
+  // on public brokers, the same way Pinpoint stores its data. No server of our own.
+  const STILE = 1024;
+  const SN = WORLD / STILE;
+  const ROOT = 'pixelcanvas/v1';
+  const LIVE_TOPIC = `${ROOT}/live`;
+  const TILE_TOPIC = (key) => `${ROOT}/tile/${key}`;
+  const BROKERS = [
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://broker.hivemq.com:8884/mqtt',
+    'wss://test.mosquitto.org:8081',
+  ];
+  const TILE_BYTES_CAP = 150000; // per retained tile payload
+  const DEAD_CAP = 300; // tombstones kept per tile
+
   const canvas = document.getElementById('board');
   const ctx = canvas.getContext('2d');
   const $ = (sel) => document.querySelector(sel);
@@ -33,11 +48,13 @@
   const cursors = new Map(); // userId -> { x, y, c, t }
   const renderQueue = new Set(); // tile keys needing (re)render
 
-  let myId = null;
-  let ws = null;
+  const store = new Map(); // storage key -> { ids:Set, dead:Set, deadList:[], min, pubTimer, lastPub, lastPayload }
+  const mine = []; // ids of strokes I drew, for undo
+  const users = new Map(); // userId -> last seen time
+  const myId = Math.random().toString(36).slice(2, 10);
   let connected = false;
   let seq = 0;
-  let backoff = 1000;
+  let liveSeq = 0;
 
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const r1 = (v) => Math.round(v * 10) / 10;
@@ -98,6 +115,28 @@
     return keys;
   }
 
+  function storageTiles(s) {
+    const p = s.points;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < p.length; i += 2) {
+      if (p[i] < minX) minX = p[i];
+      if (p[i] > maxX) maxX = p[i];
+      if (p[i + 1] < minY) minY = p[i + 1];
+      if (p[i + 1] > maxY) maxY = p[i + 1];
+    }
+    const r = s.size / 2 + 2;
+    const x0 = clamp(Math.floor((minX - r) / STILE), 0, SN - 1);
+    const x1 = clamp(Math.floor((maxX + r) / STILE), 0, SN - 1);
+    const y0 = clamp(Math.floor((minY - r) / STILE), 0, SN - 1);
+    const y1 = clamp(Math.floor((maxY + r) / STILE), 0, SN - 1);
+    const keys = [];
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) keys.push(`${x}_${y}`);
+    return keys;
+  }
+
   function drawStroke(c, s) {
     const p = s.points;
     if (p.length < 2) return;
@@ -137,6 +176,8 @@
     strokes.set(s.id, s);
     order.push(s.id);
     s.tiles = strokeTiles(s);
+    s.stiles = storageTiles(s);
+    for (const k of s.stiles) tileRec(k).ids.add(s.id);
     for (const k of s.tiles) {
       let arr = tileIndex.get(k);
       if (!arr) tileIndex.set(k, (arr = []));
@@ -153,6 +194,10 @@
     strokes.delete(id);
     const i = order.indexOf(id);
     if (i >= 0) order.splice(i, 1);
+    for (const k of s.stiles || []) {
+      const rec = store.get(k);
+      if (rec) rec.ids.delete(id);
+    }
     for (const k of s.tiles) {
       const arr = tileIndex.get(k);
       if (arr) {
@@ -165,18 +210,31 @@
     requestRender();
   }
 
-  function trimStrokes(n) {
-    for (let i = 0; i < n && order.length; i++) removeStroke(order[0]);
+  function tileRec(key) {
+    let rec = store.get(key);
+    if (!rec) {
+      rec = { ids: new Set(), dead: new Set(), deadList: [], min: 0, pubTimer: null, lastPub: 0, lastPayload: '' };
+      store.set(key, rec);
+    }
+    return rec;
   }
 
-  function resetData() {
-    strokes.clear();
-    order.length = 0;
-    tileIndex.clear();
-    bitmaps.clear();
-    activeStrokes.clear();
-    cursors.clear();
-    renderQueue.clear();
+  function tombstone(rec, id) {
+    if (rec.dead.has(id)) return;
+    rec.dead.add(id);
+    rec.deadList.push(id);
+    while (rec.deadList.length > DEAD_CAP) rec.dead.delete(rec.deadList.shift());
+  }
+
+  // Undo path: remove everywhere, remember the tombstone and republish the tiles.
+  function deleteStroke(id) {
+    const s = strokes.get(id);
+    if (!s) return;
+    for (const k of s.stiles) {
+      tombstone(tileRec(k), id);
+      schedulePublish(k);
+    }
+    removeStroke(id);
   }
 
   // ------------------------------------------------------------ tiles
@@ -274,6 +332,7 @@
     const tx1 = clamp(Math.floor(br.x / TILE), 0, N - 1);
     const ty0 = clamp(Math.floor(tl.y / TILE), 0, N - 1);
     const ty1 = clamp(Math.floor(br.y / TILE), 0, N - 1);
+    wantStorage(tl, br);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     for (let ty = ty0; ty <= ty1; ty++) {
@@ -364,10 +423,6 @@
   let flushTimer = null;
 
   function startStroke(sx, sy) {
-    if (!connected) {
-      showBanner('Connecting to the canvas…');
-      return;
-    }
     const w = screenToWorld(sx, sy);
     const x = r1(clamp(w.x, 0, WORLD));
     const y = r1(clamp(w.y, 0, WORLD));
@@ -375,7 +430,8 @@
     const s = { id, color: state.color, size: state.size, erase: state.tool === 'eraser', points: [x, y] };
     activeStrokes.set(id, s);
     drawing = { s, pending: [], lastX: x, lastY: y };
-    send({ t: 'start', id, color: s.color, size: s.size, erase: s.erase, p: [x, y] });
+    s.t = Date.now();
+    sendLive({ t: 'start', id, c: s.color, w: s.size, e: s.erase ? 1 : 0, p: [x, y] });
     requestRender();
   }
 
@@ -405,7 +461,7 @@
   function flushPending() {
     flushTimer = null;
     if (drawing && drawing.pending.length) {
-      send({ t: 'move', id: drawing.s.id, p: drawing.pending });
+      sendLive({ t: 'move', id: drawing.s.id, p: drawing.pending });
       drawing.pending = [];
     }
   }
@@ -421,7 +477,10 @@
     drawing = null;
     activeStrokes.delete(s.id);
     commitStroke(s);
-    send({ t: 'end', id: s.id });
+    mine.push(s.id);
+    if (mine.length > 500) mine.shift();
+    for (const k of s.stiles) schedulePublish(k);
+    sendLive({ t: 'end', s: packStroke(s) });
   }
 
   // ------------------------------------------------------------ pointer input
@@ -447,7 +506,11 @@
 
   canvas.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    canvas.setPointerCapture(e.pointerId);
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic or already-released pointer */
+    }
     if (e.pointerType === 'mouse') {
       // A mouse has one pointer; drop any stale entry so it can never look like a pinch.
       for (const [id, p] of pointers) if (p.type === 'mouse') pointers.delete(id);
@@ -581,109 +644,399 @@
     }
   });
 
-  // ------------------------------------------------------------ network
-  function send(obj) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  // ------------------------------------------------------------ network (MQTT)
+  const links = BROKERS.map((url) => ({ url, client: null, ready: false }));
+  const subscribed = new Map(); // storage key -> last time it was needed
+  const seenLive = new Set();
+  const seenLiveList = [];
+
+  function readyLinks() {
+    return links.filter((l) => l.ready);
+  }
+
+  function publish(topic, payload, opts) {
+    let sent = false;
+    for (const l of readyLinks()) {
+      try {
+        l.client.publish(topic, payload, opts);
+        sent = true;
+      } catch {
+        /* broker hiccup, another link will carry it */
+      }
+    }
+    return sent;
+  }
+
+  function sendLive(msg) {
+    msg.u = myId;
+    msg.n = ++liveSeq;
+    publish(LIVE_TOPIC, JSON.stringify(msg), { qos: 0, retain: false });
   }
 
   let lastCursorSend = 0;
   function sendCursor(sx, sy) {
     const now = performance.now();
-    if (!connected || now - lastCursorSend < 50) return;
+    if (!connected || now - lastCursorSend < 100) return;
     lastCursorSend = now;
     const w = screenToWorld(sx, sy);
-    send({ t: 'cursor', x: r1(w.x), y: r1(w.y) });
+    sendLive({ t: 'cursor', x: r1(w.x), y: r1(w.y), c: state.color });
+  }
+
+  function sendHello() {
+    sendLive({ t: 'hello' });
   }
 
   function undo() {
     if (drawing) endStroke();
-    send({ t: 'undo' });
-  }
-
-  function connect() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.onopen = () => {
-      backoff = 1000;
-    };
-    ws.onmessage = (ev) => {
-      let m;
-      try {
-        m = JSON.parse(ev.data);
-      } catch {
+    while (mine.length) {
+      const id = mine.pop();
+      if (strokes.has(id)) {
+        deleteStroke(id);
+        sendLive({ t: 'remove', id });
         return;
       }
-      handle(m);
-    };
-    ws.onclose = () => {
-      connected = false;
-      setStatus('Reconnecting…', 'off');
-      if (drawing) {
-        const s = drawing.s;
-        drawing = null;
-        activeStrokes.delete(s.id);
-        commitStroke(s);
-      }
-      setTimeout(connect, backoff);
-      backoff = Math.min(backoff * 2, 10000);
-    };
-    ws.onerror = () => ws.close();
+    }
+    showBanner('Nothing of yours to undo');
   }
 
-  function handle(m) {
+  // --- compact stroke format for the wire and for retained tiles
+  function packPoints(p) {
+    const out = [];
+    let px = 0;
+    let py = 0;
+    for (let i = 0; i < p.length; i += 2) {
+      const x = Math.round(p[i] * 10);
+      const y = Math.round(p[i + 1] * 10);
+      out.push(x - px, y - py);
+      px = x;
+      py = y;
+    }
+    return out;
+  }
+
+  function unpackPoints(d) {
+    const out = [];
+    let x = 0;
+    let y = 0;
+    for (let i = 0; i + 1 < d.length; i += 2) {
+      x += d[i];
+      y += d[i + 1];
+      out.push(clamp(x / 10, 0, WORLD), clamp(y / 10, 0, WORLD));
+    }
+    return out;
+  }
+
+  function packStroke(s) {
+    const o = { i: s.id, c: s.color, w: s.size, t: s.t, p: packPoints(s.points) };
+    if (s.erase) o.e = 1;
+    return o;
+  }
+
+  const COLOR_RE = /^#[0-9a-f]{6}$/i;
+  function unpackStroke(o) {
+    if (!o || typeof o.i !== 'string' || o.i.length > 40 || !Array.isArray(o.p)) return null;
+    const points = unpackPoints(o.p.filter((v) => typeof v === 'number' && Number.isFinite(v)));
+    if (points.length < 2 || points.length > MAX_POINTS * 2) return null;
+    return {
+      id: o.i,
+      color: COLOR_RE.test(o.c) ? o.c.toLowerCase() : '#1a1a1a',
+      size: clamp(Number(o.w) || 5, 1, 64),
+      erase: !!o.e,
+      t: Number(o.t) || 0,
+      points,
+    };
+  }
+
+  // --- subscriptions follow the viewport
+  function wantStorage(tl, br) {
+    const margin = STILE / 2;
+    const x0 = clamp(Math.floor((tl.x - margin) / STILE), 0, SN - 1);
+    const x1 = clamp(Math.floor((br.x + margin) / STILE), 0, SN - 1);
+    const y0 = clamp(Math.floor((tl.y - margin) / STILE), 0, SN - 1);
+    const y1 = clamp(Math.floor((br.y + margin) / STILE), 0, SN - 1);
+    const now = performance.now();
+    const fresh = [];
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const key = `${x}_${y}`;
+        if (!subscribed.has(key)) fresh.push(key);
+        subscribed.set(key, now);
+      }
+    }
+    if (fresh.length) subscribeTopics(fresh.map(TILE_TOPIC));
+  }
+
+  function subscribeTopics(topics) {
+    for (const l of readyLinks()) {
+      try {
+        l.client.subscribe(topics, { qos: 0 });
+      } catch {
+        /* retried on reconnect */
+      }
+    }
+  }
+
+  function refreshSubscriptions() {
+    wantStorage(screenToWorld(0, 0), screenToWorld(W, H));
+  }
+
+  setInterval(() => {
+    refreshSubscriptions();
+    const now = performance.now();
+    const stale = [];
+    for (const [key, t] of subscribed) {
+      if (now - t > 20000) {
+        stale.push(key);
+        subscribed.delete(key);
+      }
+    }
+    if (stale.length) {
+      for (const l of readyLinks()) {
+        try {
+          l.client.unsubscribe(stale.map(TILE_TOPIC));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }, 5000);
+
+  // --- retained tiles: merge whatever the brokers hold with what we know
+  function schedulePublish(key) {
+    const rec = tileRec(key);
+    if (rec.pubTimer) return;
+    const wait = Math.max(400, 1500 - (performance.now() - rec.lastPub));
+    rec.pubTimer = setTimeout(() => {
+      rec.pubTimer = null;
+      publishTile(key);
+    }, wait);
+  }
+
+  function publishTile(key) {
+    const rec = tileRec(key);
+    let list = [...rec.ids].map((id) => strokes.get(id)).filter(Boolean);
+    list.sort((a, b) => a.t - b.t);
+    let packed = list.map(packStroke);
+    let body = { v: 1, m: rec.min, d: rec.deadList.slice(-DEAD_CAP), s: packed };
+    let payload = JSON.stringify(body);
+    // Keep each tile under the brokers' comfort zone by forgetting the oldest strokes.
+    while (payload.length > TILE_BYTES_CAP && list.length > 1) {
+      const dropCount = Math.max(1, Math.floor(list.length * 0.15));
+      const dropped = list.splice(0, dropCount);
+      rec.min = list[0].t;
+      for (const s of dropped) removeStroke(s.id);
+      packed = list.map(packStroke);
+      body = { v: 1, m: rec.min, d: rec.deadList.slice(-DEAD_CAP), s: packed };
+      payload = JSON.stringify(body);
+    }
+    rec.lastPub = performance.now();
+    rec.lastPayload = payload;
+    if (!publish(TILE_TOPIC(key), payload, { qos: 1, retain: true })) {
+      // Offline: try again once a broker is back.
+      setTimeout(() => schedulePublish(key), 3000);
+    }
+  }
+
+  function mergeTile(key, payload) {
+    const rec = tileRec(key);
+    if (!payload) return; // retained message was cleared
+    if (payload === rec.lastPayload) return; // our own publish echoed back, or a duplicate broker copy
+    let body;
+    try {
+      body = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (!body || !Array.isArray(body.s)) return;
+    rec.lastPayload = payload;
+    let needPublish = false;
+    if (typeof body.m === 'number' && body.m > rec.min) rec.min = body.m;
+    if (Array.isArray(body.d)) {
+      for (const id of body.d) {
+        if (typeof id !== 'string') continue;
+        if (!rec.dead.has(id)) tombstone(rec, id);
+        if (strokes.has(id)) removeStroke(id);
+      }
+    }
+    const seen = new Set();
+    for (const o of body.s) {
+      const s = unpackStroke(o);
+      if (!s) continue;
+      if (rec.dead.has(s.id)) {
+        needPublish = true;
+        continue;
+      }
+      if (s.t < rec.min) continue;
+      seen.add(s.id);
+      if (!strokes.has(s.id)) commitStroke(s);
+      else rec.ids.add(s.id);
+    }
+    for (const id of [...rec.ids]) {
+      if (seen.has(id)) continue;
+      const s = strokes.get(id);
+      if (!s) {
+        rec.ids.delete(id);
+        continue;
+      }
+      if (s.t < rec.min) {
+        removeStroke(id);
+        continue;
+      }
+      needPublish = true; // the brokers are missing a stroke we know about
+    }
+    if (needPublish) schedulePublish(key);
+  }
+
+  // --- live traffic
+  function onLive(payload) {
+    let m;
+    try {
+      m = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (!m || typeof m.u !== 'string' || m.u === myId) return;
+    const dedupe = `${m.u}:${m.n}`;
+    if (seenLive.has(dedupe)) return;
+    seenLive.add(dedupe);
+    seenLiveList.push(dedupe);
+    while (seenLiveList.length > 4000) seenLive.delete(seenLiveList.shift());
+    users.set(m.u, performance.now());
     switch (m.t) {
-      case 'init':
-        resetData();
-        myId = m.id;
-        for (const s of m.strokes) commitStroke(s);
-        for (const s of m.active) activeStrokes.set(s.id, s);
-        connected = true;
-        setStatus('Live', 'live');
-        setUsers(m.users);
+      case 'start': {
+        const s = unpackStroke({ i: m.id, c: m.c, w: m.w, e: m.e, t: Date.now(), p: packPoints(Array.isArray(m.p) ? m.p.slice(0, 2) : []) });
+        if (!s || !s.id.startsWith(`${m.u}-`)) return;
+        activeStrokes.set(s.id, s);
         requestRender();
         break;
-      case 'start':
-        activeStrokes.set(m.s.id, m.s);
-        requestRender();
-        break;
+      }
       case 'move': {
         const s = activeStrokes.get(m.id);
-        if (s) {
-          for (const v of m.p) s.points.push(v);
-          requestRender();
+        if (!s || !Array.isArray(m.p) || s.points.length >= MAX_POINTS * 2) return;
+        for (let i = 0; i + 1 < m.p.length; i += 2) {
+          const x = m.p[i];
+          const y = m.p[i + 1];
+          if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y)) {
+            s.points.push(clamp(x, 0, WORLD), clamp(y, 0, WORLD));
+          }
         }
+        requestRender();
         break;
       }
       case 'end': {
-        const s = activeStrokes.get(m.id);
-        if (s) {
-          activeStrokes.delete(m.id);
-          commitStroke(s);
-        }
+        const s = unpackStroke(m.s);
+        if (!s || !s.id.startsWith(`${m.u}-`)) return;
+        activeStrokes.delete(s.id);
+        commitStroke(s);
         break;
       }
       case 'remove':
-        activeStrokes.delete(m.id);
-        removeStroke(m.id);
-        break;
-      case 'trim':
-        trimStrokes(m.n);
+        if (typeof m.id === 'string' && m.id.startsWith(`${m.u}-`)) {
+          activeStrokes.delete(m.id);
+          deleteStrokeQuiet(m.id);
+        }
         break;
       case 'cursor':
-        cursors.set(m.id, { x: m.x, y: m.y, c: m.c, t: performance.now() });
-        requestRender();
-        break;
-      case 'leave':
-        cursors.delete(m.id);
-        requestRender();
-        break;
-      case 'users':
-        setUsers(m.n);
+        if (typeof m.x === 'number' && typeof m.y === 'number') {
+          cursors.set(m.u, { x: m.x, y: m.y, c: COLOR_RE.test(m.c) ? m.c : '#1a1a1a', t: performance.now() });
+          requestRender();
+        }
         break;
       default:
         break;
     }
+    updateUsers();
   }
+
+  // Someone else undid their stroke: drop it and remember the tombstone, they publish the tile.
+  function deleteStrokeQuiet(id) {
+    const s = strokes.get(id);
+    if (!s) return;
+    for (const k of s.stiles) tombstone(tileRec(k), id);
+    removeStroke(id);
+  }
+
+  function onMessage(topic, buf) {
+    const payload = buf.toString();
+    if (topic === LIVE_TOPIC) {
+      onLive(payload);
+      return;
+    }
+    if (topic.startsWith(`${ROOT}/tile/`)) mergeTile(topic.slice(ROOT.length + 6), payload);
+  }
+
+  function connect() {
+    if (typeof mqtt === 'undefined') {
+      setStatus('Offline: library failed to load', 'off');
+      return;
+    }
+    for (const l of links) {
+      let client;
+      try {
+        client = mqtt.connect(l.url, {
+          connectTimeout: 8000,
+          reconnectPeriod: 5000,
+          keepalive: 30,
+          clean: true,
+          clientId: `pxc_${myId}_${Math.random().toString(36).slice(2, 6)}`,
+        });
+      } catch {
+        continue;
+      }
+      l.client = client;
+      client.on('connect', () => {
+        l.ready = true;
+        const topics = [LIVE_TOPIC, ...[...subscribed.keys()].map(TILE_TOPIC)];
+        try {
+          client.subscribe(topics, { qos: 0 });
+        } catch {
+          /* ignore */
+        }
+        updateConnection();
+        sendHello();
+      });
+      client.on('message', onMessage);
+      client.on('close', () => {
+        l.ready = false;
+        updateConnection();
+      });
+      client.on('error', () => {
+        /* mqtt.js reconnects on its own */
+      });
+    }
+  }
+
+  function updateConnection() {
+    const n = readyLinks().length;
+    connected = n > 0;
+    if (connected) setStatus('Live', 'live');
+    else setStatus('Reconnecting…', 'off');
+    updateUsers();
+  }
+
+  function updateUsers() {
+    const now = performance.now();
+    let n = 1;
+    for (const [id, t] of users) {
+      if (now - t > 45000) users.delete(id);
+      else n++;
+    }
+    setUsers(n);
+  }
+
+  setInterval(() => {
+    if (connected) sendHello();
+    updateUsers();
+  }, 15000);
+
+  // Small debug hook so the page can be inspected from the console.
+  window.__pixelCanvas = {
+    get strokes() { return strokes.size; },
+    get brokers() { return readyLinks().map((l) => l.url); },
+    get id() { return myId; },
+    get subscribed() { return subscribed.size; },
+    cam,
+  };
 
   // ------------------------------------------------------------ ui
   const help = $('#help');
@@ -807,5 +1160,6 @@
   setSize(SIZES[1]);
   readHash();
   resize();
+  refreshSubscriptions();
   connect();
 })();
