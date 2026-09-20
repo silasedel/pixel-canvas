@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: pixel-canvas
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
