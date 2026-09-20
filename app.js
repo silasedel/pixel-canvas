@@ -1,60 +1,56 @@
 'use strict';
 
 (() => {
-  // ------------------------------------------------------------ world
-  const REGION = 16384; // world units per region
-  const RN = 16; // regions per side
-  const WORLD = REGION * RN; // 262,144 units per side
-  const TILE = 512; // render tile
-  const N = WORLD / TILE;
-  const STILE = 1024; // storage tile (one retained message each)
-  const SN = WORLD / STILE;
-  const MIN_ZOOM = 0.05;
-  const MAX_ZOOM = 16;
-  const MAX_POINTS = 4000;
-  const TIDE_MS = 60 * 60 * 1000;
+  // ============================================================== constants
+  const MW = 131072; // map width in world units (360 degrees, wraps around)
+  const MH = 65536; // map height (pole to pole)
+  const TAU = Math.PI * 2;
+  const PI = Math.PI;
+  const DEG = PI / 180;
+  const CELL = 8192; // storage cell: a 16 x 8 grid over the planet
+  const GX = MW / CELL;
+  const GY = MH / CELL;
+  const PLANET_KM = 6371;
+  const MAX_POINTS = 2000;
+  const MAX_SPAN = 6000; // hard cap on how far a single stroke can reach
+  const SIZE_PX = [2, 5, 11, 24, 50]; // brush sizes, in screen pixels at the current zoom
   const PALETTE = [
-    '#1a1a1a', '#6b7280', '#e11d48', '#f97316', '#eab308', '#22c55e',
-    '#14b8a6', '#0ea5e9', '#3b82f6', '#8b5cf6', '#ec4899', '#92400e', 'rainbow',
+    '#111318', '#6b7280', '#ffffff', '#e11d48', '#f97316', '#eab308',
+    '#22c55e', '#14b8a6', '#0ea5e9', '#3b82f6', '#8b5cf6', '#ec4899', 'rainbow',
   ];
-  const SIZES = [2, 5, 10, 20, 40];
 
-  const ROOT = 'pixelcanvas/v2';
+  const ROOT = 'pixelcanvas/v3';
   const LIVE_TOPIC = `${ROOT}/live`;
-  const TILE_TOPIC = (key) => `${ROOT}/tile/${key}`;
+  const TILE_TOPIC = (k) => `${ROOT}/tile/${k}`;
   const BROKERS = [
     'wss://broker.emqx.io:8084/mqtt',
     'wss://broker.hivemq.com:8884/mqtt',
     'wss://test.mosquitto.org:8081',
   ];
-  const TILE_BYTES_CAP = 150000;
-  const DEAD_CAP = 300;
+  const TILE_BYTES_CAP = 90000;
+  const DEAD_CAP = 250;
 
-  // ------------------------------------------------------------ region effects
-  const FX = {
-    plain: { label: 'Open Canvas', bg: '#ffffff', desc: 'Plain white canvas. Draw whatever you like.' },
-    void: { label: 'The Void', bg: '#0b0f1a', desc: 'Dark as space. Everything you draw glows.' },
-    mirror: { label: 'Kaleidoscope', bg: '#f3e8ff', desc: 'Every stroke is mirrored eight ways around the center.' },
-    pixel: { label: 'Pixel Land', bg: '#fefce8', desc: 'Everything snaps to a chunky grid. Pixel art only.' },
-    rainbow: { label: 'Rainbow Reach', bg: '#ffffff', desc: 'Your color is ignored. Every stroke cycles the whole rainbow.' },
-    tides: { label: 'The Tides', bg: '#ccfbf1', desc: 'Drawings wash away one hour after they are made.' },
-    giant: { label: 'Giant Country', bg: '#fff7ed', desc: 'Brushes are five times bigger here.' },
-    tiny: { label: 'Tiny Town', bg: '#f0fdf4', desc: 'Brushes are four times smaller. Zoom in.' },
-    wobble: { label: 'Wobble Woods', bg: '#ecfccb', desc: 'Lines wobble like jelly.' },
-    sketch: { label: 'Sketchbook', bg: '#f7f3e8', desc: 'Pencil on paper. Strokes come out rough and layered.' },
-    blueprint: { label: 'Blueprint', bg: '#1e3a8a', desc: 'White ink on blue paper, whatever color you pick.' },
-    invert: { label: 'Negative Zone', bg: '#111111', desc: 'Every color comes out inverted, on black.' },
-    gravity: { label: 'Drip City', bg: '#fdf2f8', desc: 'Wet paint. Strokes drip downward.' },
-    echo: { label: 'Echo Chamber', bg: '#eef2ff', desc: 'Strokes leave fading trails behind them.' },
-    glitch: { label: 'Glitch Grid', bg: '#f1f5f9', desc: 'Lines jump and tear apart as you draw.' },
-    chalk: { label: 'Chalkboard', bg: '#14532d', desc: 'Soft pastel chalk on a green board.' },
+  const COL = {
+    space: '#05070d',
+    ocean: '#9fc4e4',
+    deep: '#7fb0d8',
+    shelf: '#c2dcf0',
+    land: '#c3d19a',
+    forest: '#9dba7e',
+    desert: '#e6d7a8',
+    mount: '#bdb3a4',
+    ice: '#f3f8fc',
+    grat: 'rgba(30, 60, 90, 0.16)',
+    gratMain: 'rgba(30, 60, 90, 0.3)',
   };
-  const FX_POOL = [
-    'plain', 'plain', 'plain', 'plain', 'void', 'mirror', 'pixel', 'rainbow', 'tides', 'giant', 'tiny',
-    'wobble', 'sketch', 'blueprint', 'invert', 'gravity', 'echo', 'glitch', 'chalk',
-  ];
-  const ADJ = ['Velvet', 'Neon', 'Hollow', 'Iron', 'Amber', 'Frozen', 'Crimson', 'Silent', 'Golden', 'Misty', 'Electric', 'Wild', 'Copper', 'Lunar', 'Salt', 'Ember', 'Paper', 'Glass', 'Thunder', 'Marble', 'Violet', 'Rusty', 'Coral', 'Shadow', 'Sunny', 'Static', 'Cobalt', 'Honey', 'Feral', 'Quiet', 'Jade', 'Solar'];
-  const NOUN = ['Hollow', 'Reach', 'Yard', 'Fields', 'Harbor', 'Cross', 'Bend', 'Heights', 'Market', 'Orchard', 'Docks', 'Steps', 'Ridge', 'Basin', 'Alley', 'Gardens', 'Row', 'Point', 'Quarter', 'Meadow', 'Bluff', 'Springs', 'Vault', 'Terrace', 'Pass', 'Hill', 'Shore', 'Lane', 'Grove', 'Plaza', 'Falls', 'Wharf'];
+
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+  const wrapPi = (a) => a - TAU * Math.round(a / TAU);
+  const lonToX = (lon) => ((lon + PI) / TAU) * MW;
+  const xToLon = (x) => (x / MW) * TAU - PI;
+  const latToY = (lat) => ((PI / 2 - lat) / PI) * MH;
+  const yToLat = (y) => PI / 2 - (y / MH) * PI;
+  const normX = (x) => ((x % MW) + MW) % MW;
 
   function hash32(str) {
     let h = 2166136261;
@@ -74,547 +70,959 @@
     };
   }
 
-  const REGIONS = [];
-  {
-    const used = new Set();
-    for (let ry = 0; ry < RN; ry++) {
-      for (let rx = 0; rx < RN; rx++) {
-        const r = rng(hash32(`region:${rx}:${ry}`));
-        let fx = FX_POOL[Math.floor(r() * FX_POOL.length)];
-        let name = `${ADJ[Math.floor(r() * ADJ.length)]} ${NOUN[Math.floor(r() * NOUN.length)]}`;
-        while (used.has(name)) name = `${ADJ[Math.floor(r() * ADJ.length)]} ${NOUN[Math.floor(r() * NOUN.length)]}`;
-        const spawnDist = Math.max(Math.abs(rx - 8), Math.abs(ry - 8));
-        if (spawnDist === 0) {
-          fx = 'plain';
-          name = 'The Commons';
-        } else if (spawnDist === 1 && fx !== 'plain' && r() < 0.5) {
-          fx = 'plain';
-        }
-        used.add(name);
-        REGIONS.push({ rx, ry, x: rx * REGION, y: ry * REGION, name, fx, ...FX[fx] });
-      }
-    }
+  // ============================================================== spherical geometry
+  function destPoint(lon1, lat1, brng, d) {
+    const sl = Math.sin(lat1);
+    const cl = Math.cos(lat1);
+    const sd = Math.sin(d);
+    const cd = Math.cos(d);
+    const lat2 = Math.asin(clamp(sl * cd + cl * sd * Math.cos(brng), -1, 1));
+    const lon2 = lon1 + Math.atan2(Math.sin(brng) * sd * cl, cd - sl * Math.sin(lat2));
+    return [lon2, lat2];
   }
-  const isDark = (hex) => {
-    const n = parseInt(hex.slice(1), 16);
-    const l = 0.2126 * (n >> 16) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255);
-    return l < 128;
-  };
-  function regionAt(x, y) {
-    const rx = clamp(Math.floor(x / REGION), 0, RN - 1);
-    const ry = clamp(Math.floor(y / REGION), 0, RN - 1);
-    return REGIONS[ry * RN + rx];
+  function gcDist(lon1, lat1, lon2, lat2) {
+    const d = Math.sin(lat1) * Math.sin(lat2) + Math.cos(lat1) * Math.cos(lat2) * Math.cos(lon2 - lon1);
+    return Math.acos(clamp(d, -1, 1));
+  }
+  function bearingTo(lon1, lat1, lon2, lat2) {
+    const dl = lon2 - lon1;
+    return Math.atan2(
+      Math.sin(dl) * Math.cos(lat2),
+      Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dl)
+    );
   }
 
-  // ------------------------------------------------------------ state
-  const canvas = document.getElementById('board');
-  const ctx = canvas.getContext('2d');
-  const $ = (sel) => document.querySelector(sel);
+  // ============================================================== the planet
+  // Continents are unions of wobbly spherical blobs, so coastlines stay crisp at
+  // every zoom level and every client draws exactly the same world.
+  const CONTINENTS = [
+    { name: 'Aurelia', lon: -96, lat: 44, blobs: [[-105, 52, 17], [-88, 40, 14], [-119, 45, 10], [-76, 51, 9], [-95, 27, 8], [-83, 60, 8]] },
+    { name: 'Verdance', lon: -62, lat: -14, blobs: [[-66, -5, 12], [-58, -23, 11], [-70, -37, 7], [-52, -9, 8]] },
+    { name: 'Norlund', lon: 16, lat: 52, blobs: [[10, 52, 10], [26, 58, 9], [1, 45, 7], [33, 47, 7], [20, 64, 7]] },
+    { name: 'Saharim', lon: 20, lat: -2, blobs: [[15, 11, 15], [29, -4, 13], [10, -16, 10], [36, 9, 9], [23, -29, 7]] },
+    { name: 'Tamarind', lon: 96, lat: 38, blobs: [[95, 45, 20], [74, 28, 13], [116, 31, 12], [70, 56, 12], [126, 52, 11], [104, 12, 8]] },
+    { name: 'Coralind', lon: 136, lat: -25, blobs: [[135, -25, 11], [149, -31, 8], [124, -20, 7]] },
+    { name: 'Mereth', lon: -155, lat: 8, blobs: [[-155, 8, 7], [-166, -3, 5], [-144, 17, 4]] },
+    { name: 'Halcyon', lon: 172, lat: -39, blobs: [[170, -38, 6], [179, -46, 4]] },
+    { name: 'Thule', lon: -38, lat: 73, blobs: [[-42, 72, 9], [-26, 78, 6]] },
+    { name: 'Solenne', lon: -20, lat: -48, blobs: [[-20, -48, 6], [-9, -54, 4]] },
+    { name: 'Kestrel Isles', lon: 62, lat: -12, blobs: [[62, -12, 4], [70, -18, 3], [55, -6, 3]] },
+  ];
+  const SEAS = [
+    { name: 'The Great Blue', lon: -150, lat: 0 },
+    { name: 'Mid Ocean', lon: -32, lat: 12 },
+    { name: 'Sunrise Sea', lon: 76, lat: -28 },
+    { name: 'Cobalt Deep', lon: 158, lat: 34 },
+    { name: 'Verge Sea', lon: -104, lat: -46 },
+    { name: 'The Northern Ice', lon: 0, lat: 84 },
+    { name: 'The Southern Ice', lon: 0, lat: -84 },
+    { name: 'Lantern Straits', lon: 44, lat: 30 },
+    { name: 'The Long Water', lon: 120, lat: -58 },
+  ];
+
+  function wobbleFn(seed) {
+    const r = rng(seed);
+    const a1 = r() * TAU;
+    const a2 = r() * TAU;
+    const a3 = r() * TAU;
+    const k1 = 0.2 + r() * 0.14;
+    const k2 = 0.1 + r() * 0.1;
+    const k3 = 0.05 + r() * 0.07;
+    return (th) => 1 + k1 * Math.sin(3 * th + a1) + k2 * Math.sin(5 * th + a2) + k3 * Math.sin(8 * th + a3);
+  }
+
+  // A polygon in map units, kept continuous across the seam.
+  function blobPoly(lonDeg, latDeg, radDeg, seed, scale) {
+    const wob = wobbleFn(seed);
+    const lon0 = lonDeg * DEG;
+    const lat0 = latDeg * DEG;
+    const rad = radDeg * DEG * (scale || 1);
+    const steps = 96;
+    const pts = new Float64Array(steps * 2);
+    let prevLon = null;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < steps; i++) {
+      const th = (i / steps) * TAU;
+      const [lon, lat] = destPoint(lon0, lat0, th, rad * wob(th));
+      let l = lon;
+      if (prevLon !== null) l = prevLon + wrapPi(l - prevLon);
+      prevLon = l;
+      const x = lonToX(wrapPi(lon0)) + ((l - lon0) / TAU) * MW;
+      const y = latToY(lat);
+      pts[i * 2] = x;
+      pts[i * 2 + 1] = y;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    return { pts, minX, maxX, minY, maxY, lon0, lat0, rad, wob };
+  }
+
+  const LAND = [];
+  const BIOMES = { forest: [], desert: [], mount: [] };
+  const CAPS = [];
+  (function buildWorld() {
+    for (const c of CONTINENTS) {
+      c.polys = [];
+      for (let i = 0; i < c.blobs.length; i++) {
+        const [lo, la, rd] = c.blobs[i];
+        const p = blobPoly(lo, la, rd, hash32(`${c.name}:${i}`), 1);
+        p.owner = c;
+        c.polys.push(p);
+        LAND.push(p);
+      }
+      // Biome patches, placed deterministically inside the continent.
+      const r = rng(hash32(`biome:${c.name}`));
+      for (let i = 0; i < c.blobs.length; i++) {
+        const [lo, la, rd] = c.blobs[i];
+        if (rd < 6) continue;
+        const kinds = ['forest', 'desert', 'mount'];
+        const n = 1 + Math.floor(r() * 2);
+        for (let k = 0; k < n; k++) {
+          const kind = kinds[Math.floor(r() * kinds.length)];
+          const off = (r() - 0.5) * rd * 1.1;
+          const off2 = (r() - 0.5) * rd * 0.9;
+          BIOMES[kind].push(blobPoly(lo + off / Math.max(0.25, Math.cos(la * DEG)), la + off2, rd * (0.35 + r() * 0.4), hash32(`${c.name}:${i}:${k}:${kind}`), 1));
+        }
+      }
+    }
+    // Polar ice caps: a wobbly band around each pole.
+    for (const sign of [1, -1]) {
+      const base = 74 * sign;
+      const wob = wobbleFn(hash32(`cap:${sign}`));
+      const steps = 180;
+      const pts = new Float64Array((steps + 3) * 2);
+      for (let i = 0; i <= steps; i++) {
+        const lon = -PI + (i / steps) * TAU;
+        const lat = (base + sign * 11 * (wob(lon) - 1)) * DEG;
+        pts[i * 2] = lonToX(lon);
+        pts[i * 2 + 1] = latToY(clamp(lat, -88 * DEG, 88 * DEG));
+      }
+      const endY = sign > 0 ? 0 : MH;
+      pts[(steps + 1) * 2] = MW;
+      pts[(steps + 1) * 2 + 1] = endY;
+      pts[(steps + 2) * 2] = 0;
+      pts[(steps + 2) * 2 + 1] = endY;
+      CAPS.push({ pts, minX: 0, maxX: MW, minY: 0, maxY: MH, sign });
+    }
+  })();
+
+  function insideBlob(p, lon, lat) {
+    const d = gcDist(p.lon0, p.lat0, lon, lat);
+    if (d > p.rad * 1.5) return false;
+    const th = bearingTo(p.lon0, p.lat0, lon, lat);
+    return d < p.rad * p.wob(th);
+  }
+
+  function placeAt(x, y) {
+    const lon = xToLon(normX(x));
+    const lat = yToLat(clamp(y, 0, MH));
+    if (Math.abs(lat) > 72 * DEG) return Math.sign(lat) > 0 ? 'The Northern Ice' : 'The Southern Ice';
+    for (const c of CONTINENTS) {
+      for (const p of c.polys) if (insideBlob(p, lon, lat)) return c.name;
+    }
+    let best = SEAS[0];
+    let bd = Infinity;
+    for (const s of SEAS) {
+      const d = gcDist(s.lon * DEG, s.lat * DEG, lon, lat);
+      if (d < bd) {
+        bd = d;
+        best = s;
+      }
+    }
+    return best.name;
+  }
+
+  const PLACES = [
+    ...CONTINENTS.map((c) => ({ name: c.name, lon: c.lon, lat: c.lat, land: true })),
+    ...SEAS.map((s) => ({ name: s.name, lon: s.lon, lat: s.lat, land: false })),
+  ];
+
+  // ============================================================== stroke store
+  const strokes = new Map(); // id -> stroke
+  const cellIds = new Map(); // cell key -> Set of ids
+  const activeStrokes = new Map(); // strokes still being drawn (mine and other people's)
+  const mine = [];
+  const cursors = new Map();
+  const users = new Map();
+  const myId = Math.random().toString(36).slice(2, 10);
+
+  function cellKeyFor(x, y) {
+    const cx = clamp(Math.floor(normX(x) / CELL), 0, GX - 1);
+    const cy = clamp(Math.floor(y / CELL), 0, GY - 1);
+    return `${cx}_${cy}`;
+  }
+
+  function strokeBBox(s) {
+    if (s.bb) return s.bb;
+    const p = s.points;
+    let a = Infinity;
+    let b = Infinity;
+    let c = -Infinity;
+    let d = -Infinity;
+    for (let i = 0; i < p.length; i += 2) {
+      if (p[i] < a) a = p[i];
+      if (p[i] > c) c = p[i];
+      if (p[i + 1] < b) b = p[i + 1];
+      if (p[i + 1] > d) d = p[i + 1];
+    }
+    const pad = s.size * (s.k === 's' ? 2.6 : 0.6) + 4;
+    const cs = Math.max(0.12, Math.cos(yToLat(clamp(s.points[1], 0, MH))));
+    s.bb = { x0: a - pad / cs, y0: b - pad, x1: c + pad / cs, y1: d + pad };
+    return s.bb;
+  }
+
+  function addToIndex(s) {
+    const k = cellKeyFor(s.points[0], s.points[1]);
+    s.cell = k;
+    let set = cellIds.get(k);
+    if (!set) cellIds.set(k, (set = new Set()));
+    set.add(s.id);
+  }
+
+  function strokesNear(win) {
+    // Storage cells overlapping the window, plus one ring, since a stroke is
+    // filed under the cell of its first point but can reach past the edge.
+    const out = [];
+    const cy0 = clamp(Math.floor(win.y0 / CELL) - 1, 0, GY - 1);
+    const cy1 = clamp(Math.floor((win.y0 + win.h) / CELL) + 1, 0, GY - 1);
+    const spanCells = Math.min(GX, Math.ceil(win.w / CELL) + 3);
+    const cxStart = Math.floor(win.x0 / CELL) - 1;
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let i = 0; i < spanCells; i++) {
+        const cx = ((((cxStart + i) % GX) + GX) % GX);
+        const set = cellIds.get(`${cx}_${cy}`);
+        if (!set) continue;
+        for (const id of set) {
+          const s = strokes.get(id);
+          if (s) out.push(s);
+        }
+      }
+    }
+    out.sort((a, b) => a.t - b.t);
+    return out;
+  }
+
+  // ============================================================== view layers
+  // A view is an equirectangular window of the planet kept on two canvases: the
+  // generated terrain, and everything people have drawn. The two are composited
+  // and handed to the GPU as the globe's texture.
+  function makeView(size, w2, whole) {
+    const mk = (a, b) => {
+      const c = document.createElement('canvas');
+      c.width = a;
+      c.height = b;
+      return c;
+    };
+    const cw = size;
+    const ch = w2 || size;
+    return {
+      cw,
+      ch,
+      whole: !!whole,
+      base: mk(cw, ch),
+      art: mk(cw, ch),
+      comp: mk(cw, ch),
+      scratch: mk(256, 256),
+      win: null,
+      tex: null,
+      valid: false,
+      dirty: null,
+      full: false,
+      mips: false,
+    };
+  }
+
+  function viewScale(v) {
+    return { sx: v.cw / v.win.w, sy: v.ch / v.win.h };
+  }
+
+  function markDirty(v, x0, y0, x1, y1) {
+    if (!v.valid || !v.win) return;
+    const { sx, sy } = viewScale(v);
+    let ax = Math.floor((x0 - v.win.x0) * sx) - 2;
+    let ay = Math.floor((y0 - v.win.y0) * sy) - 2;
+    let bx = Math.ceil((x1 - v.win.x0) * sx) + 2;
+    let by = Math.ceil((y1 - v.win.y0) * sy) + 2;
+    if (v.whole) {
+      // The world view wraps, so a stroke on the seam touches both edges.
+      if (bx < 0 || ax > v.cw) {
+        const shift = ax > v.cw ? -v.cw : v.cw;
+        ax += shift;
+        bx += shift;
+      }
+    }
+    ax = clamp(ax, 0, v.cw);
+    bx = clamp(bx, 0, v.cw);
+    ay = clamp(ay, 0, v.ch);
+    by = clamp(by, 0, v.ch);
+    if (bx <= ax || by <= ay) return;
+    if (!v.dirty) v.dirty = { x0: ax, y0: ay, x1: bx, y1: by };
+    else {
+      v.dirty.x0 = Math.min(v.dirty.x0, ax);
+      v.dirty.y0 = Math.min(v.dirty.y0, ay);
+      v.dirty.x1 = Math.max(v.dirty.x1, bx);
+      v.dirty.y1 = Math.max(v.dirty.y1, by);
+    }
+  }
+
+  function offsetsFor(v, x0, x1) {
+    // Which copies of a shape (seam wrap) land inside this window.
+    const out = [];
+    for (const dx of [-MW, 0, MW]) {
+      if (x1 + dx > v.win.x0 && x0 + dx < v.win.x0 + v.win.w) out.push(dx);
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------- terrain paint
+  function addPoly(ctx, pts, dx) {
+    ctx.moveTo(pts[0] + dx, pts[1]);
+    for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i] + dx, pts[i + 1]);
+    ctx.closePath();
+  }
+  function pathPolys(ctx, v, polys) {
+    ctx.beginPath();
+    for (const p of polys) {
+      for (const dx of offsetsFor(v, p.minX, p.maxX)) addPoly(ctx, p.pts, dx);
+    }
+  }
+
+  function paintTerrain(v) {
+    const ctx = v.base.getContext('2d');
+    const { sx, sy } = viewScale(v);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = COL.ocean;
+    ctx.fillRect(0, 0, v.cw, v.ch);
+    ctx.setTransform(sx, 0, 0, sy, -v.win.x0 * sx, -v.win.y0 * sy);
+
+    // Shallow water ringing the coasts.
+    ctx.lineJoin = 'round';
+    pathPolys(ctx, v, LAND);
+    ctx.strokeStyle = COL.shelf;
+    ctx.lineWidth = 900;
+    ctx.stroke();
+    ctx.fillStyle = COL.land;
+    ctx.fill();
+
+    ctx.save();
+    pathPolys(ctx, v, LAND);
+    ctx.clip();
+    for (const kind of ['forest', 'desert', 'mount']) {
+      pathPolys(ctx, v, BIOMES[kind]);
+      ctx.fillStyle = COL[kind];
+      ctx.fill();
+    }
+    ctx.restore();
+
+    pathPolys(ctx, v, CAPS);
+    ctx.fillStyle = COL.ice;
+    ctx.fill();
+
+    // Graticule, drawn in pixel space so the lines stay hairline thin.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.lineWidth = Math.max(1, Math.round(v.cw / 1400));
+    for (let d = -180; d < 180; d += 15) {
+      const x = lonToX(d * DEG);
+      for (const dx of offsetsFor(v, x, x)) {
+        const px = Math.round((x + dx - v.win.x0) * sx) + 0.5;
+        if (px < 0 || px > v.cw) continue;
+        ctx.strokeStyle = d === 0 ? COL.gratMain : COL.grat;
+        ctx.beginPath();
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, v.ch);
+        ctx.stroke();
+      }
+    }
+    for (let d = -75; d <= 75; d += 15) {
+      const py = Math.round((latToY(d * DEG) - v.win.y0) * sy) + 0.5;
+      if (py < 0 || py > v.ch) continue;
+      ctx.strokeStyle = d === 0 ? COL.gratMain : COL.grat;
+      ctx.beginPath();
+      ctx.moveTo(0, py);
+      ctx.lineTo(v.cw, py);
+      ctx.stroke();
+    }
+  }
+
+  // -------------------------------------------------------------- stroke paint
+  function rainbowAt(id, len) {
+    return `hsl(${(hash32(id) % 360 + len) % 360} 90% 55%)`;
+  }
+
+  function paintStroke(ctx, v, s, dx) {
+    const { sx, sy } = viewScale(v);
+    const p = s.points;
+    if (p.length < 2) return;
+    // Longitude is stretched in this projection, so widen the pen to match:
+    // that keeps a round brush round once it is wrapped onto the sphere.
+    const cosLat = clamp(Math.cos(yToLat(s.cy0 !== undefined ? s.cy0 : p[1])), 0.12, 1);
+    const k = (sx / sy) / cosLat;
+    ctx.setTransform(sy * k, 0, 0, sy, (dx - v.win.x0) * sx, -v.win.y0 * sy);
+    const fx = (x) => x * cosLat;
+    const minW = (v.whole ? 3.2 : 1.15) / sy;
+    const w = Math.max(s.size, minW);
+    const rainbow = !s.erase && s.color === 'rainbow';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.globalCompositeOperation = s.erase ? 'destination-out' : 'source-over';
+    const solid = s.erase ? '#000' : s.color;
+
+    if (s.k === 's') {
+      const r = rng(hash32(s.id) ^ 0x5bd1e995);
+      const radius = w * 1.9;
+      ctx.fillStyle = solid;
+      for (let i = 0; i < p.length; i += 2) {
+        if (rainbow) ctx.fillStyle = rainbowAt(s.id, i * 5);
+        for (let n = 0; n < 7; n++) {
+          const a = r() * TAU;
+          const d = Math.sqrt(r()) * radius;
+          ctx.beginPath();
+          ctx.arc(fx(p[i]) + Math.cos(a) * d, p[i + 1] + Math.sin(a) * d, w * 0.08 + r() * w * 0.2 + minW * 0.4, 0, TAU);
+          ctx.fill();
+        }
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      return;
+    }
+
+    ctx.lineWidth = w;
+    if (p.length === 2) {
+      ctx.fillStyle = rainbow ? rainbowAt(s.id, 0) : solid;
+      ctx.beginPath();
+      ctx.arc(fx(p[0]), p[1], w / 2, 0, TAU);
+      ctx.fill();
+    } else if (rainbow) {
+      let len = 0;
+      for (let i = 2; i < p.length; i += 2) {
+        len += (Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]) / Math.max(w, 1)) * 16;
+        ctx.strokeStyle = rainbowAt(s.id, len);
+        ctx.beginPath();
+        ctx.moveTo(fx(p[i - 2]), p[i - 1]);
+        ctx.lineTo(fx(p[i]), p[i + 1]);
+        ctx.stroke();
+      }
+    } else {
+      ctx.strokeStyle = solid;
+      ctx.beginPath();
+      ctx.moveTo(fx(p[0]), p[1]);
+      if (p.length === 4) ctx.lineTo(fx(p[2]), p[3]);
+      else {
+        for (let i = 2; i < p.length - 2; i += 2) {
+          ctx.quadraticCurveTo(fx(p[i]), p[i + 1], (fx(p[i]) + fx(p[i + 2])) / 2, (p[i + 1] + p[i + 3]) / 2);
+        }
+        ctx.lineTo(fx(p[p.length - 2]), p[p.length - 1]);
+      }
+      ctx.stroke();
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawStrokeInView(v, s) {
+    if (!v.valid || !v.win) return;
+    const bb = strokeBBox(s);
+    if (bb.y1 < v.win.y0 || bb.y0 > v.win.y0 + v.win.h) return;
+    const ctx = v.art.getContext('2d');
+    let drew = false;
+    for (const dx of offsetsFor(v, bb.x0, bb.x1)) {
+      paintStroke(ctx, v, s, dx);
+      drew = true;
+    }
+    if (drew) markDirty(v, bb.x0, bb.y0, bb.x1, bb.y1);
+  }
+
+  function repaintArtRect(v, x0, y0, x1, y1) {
+    if (!v.valid || !v.win) return;
+    const { sx, sy } = viewScale(v);
+    const ctx = v.art.getContext('2d');
+    const list = strokesNear({ x0: x0 - MAX_SPAN, y0: y0 - MAX_SPAN, w: x1 - x0 + MAX_SPAN * 2, h: y1 - y0 + MAX_SPAN * 2 })
+      .concat([...activeStrokes.values()].sort((a, b) => a.t - b.t));
+    for (const dx of offsetsFor(v, x0, x1)) {
+      const px = (x0 + dx - v.win.x0) * sx;
+      const py = (y0 - v.win.y0) * sy;
+      const pw = (x1 - x0) * sx;
+      const ph = (y1 - y0) * sy;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.beginPath();
+      ctx.rect(px, py, pw, ph);
+      ctx.clip();
+      ctx.clearRect(px, py, pw, ph);
+      for (const s of list) {
+        const bb = strokeBBox(s);
+        if (bb.x1 < x0 || bb.x0 > x1 || bb.y1 < y0 || bb.y0 > y1) continue;
+        for (const d2 of offsetsFor(v, bb.x0, bb.x1)) paintStroke(ctx, v, s, d2);
+      }
+      ctx.restore();
+    }
+    markDirty(v, x0, y0, x1, y1);
+  }
+
+  function rebuildView(v, win) {
+    v.win = win;
+    v.valid = true;
+    paintTerrain(v);
+    const actx = v.art.getContext('2d');
+    actx.setTransform(1, 0, 0, 1, 0, 0);
+    actx.clearRect(0, 0, v.cw, v.ch);
+    const list = strokesNear(win).concat([...activeStrokes.values()]);
+    list.sort((a, b) => a.t - b.t);
+    for (const s of list) drawStrokeInView(v, s);
+    v.full = true;
+    v.dirty = null;
+    v.mips = false;
+  }
+
+  function compositeRect(v, x0, y0, x1, y1) {
+    const ctx = v.comp.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+    ctx.drawImage(v.base, x0, y0, x1 - x0, y1 - y0, x0, y0, x1 - x0, y1 - y0);
+    ctx.drawImage(v.art, x0, y0, x1 - x0, y1 - y0, x0, y0, x1 - x0, y1 - y0);
+  }
+
+  // ============================================================== camera
+  const stars = document.getElementById('stars');
+  const glCanvas = document.getElementById('globe');
+  const overlay = document.getElementById('overlay');
+  const octx = overlay.getContext('2d');
 
   let W = 1;
   let H = 1;
   let dpr = 1;
-  const cam = { x: REGION * 8.5, y: REGION * 8.5, zoom: 1 };
-  const state = { tool: 'pen', color: PALETTE[0], size: SIZES[1] };
+  const cam = { lon: -0.3, lat: 0.35, R: 300 };
+  const state = { tool: 'pen', color: PALETTE[0], sizeIdx: 1 };
 
-  const strokes = new Map(); // id -> committed stroke
-  const order = [];
-  const tileIndex = new Map(); // render tile key -> [ids]
-  const bitmaps = new Map(); // render tile key -> bitmap
-  const activeStrokes = new Map();
-  const cursors = new Map();
-  const renderQueue = new Set();
-  const store = new Map(); // storage key -> record
-  const mine = [];
-  const users = new Map();
-  const myId = Math.random().toString(36).slice(2, 10);
-  let connected = false;
-  let seq = 0;
-  let liveSeq = 0;
+  const Rcover = () => 0.5 * Math.hypot(W, H);
+  const Rfit = () => 0.44 * Math.min(W, H);
+  const Rmin = () => Rfit() * 0.92;
+  const Rmax = () => Rcover() * 120;
+  const Rdraw = () => Rcover() * 5;
+  const canDraw = () => cam.R >= Rdraw();
+  const viewKm = () => 2 * Math.asin(clamp(Math.min(W, H) / 2 / cam.R, 0, 1)) * PLANET_KM;
+  const pxPerUnit = () => (cam.R * TAU) / MW;
 
-  function clamp(v, lo, hi) {
-    return Math.min(hi, Math.max(lo, v));
-  }
-  const r1 = (v) => Math.round(v * 10) / 10;
-
-  // ------------------------------------------------------------ camera
-  function screenToWorld(sx, sy) {
-    return { x: (sx - W / 2) / cam.zoom + cam.x, y: (sy - H / 2) / cam.zoom + cam.y };
-  }
-  const worldToScreenX = (wx) => (wx - cam.x) * cam.zoom + W / 2;
-  const worldToScreenY = (wy) => (wy - cam.y) * cam.zoom + H / 2;
-
-  function clampCam() {
-    cam.zoom = clamp(cam.zoom, MIN_ZOOM, MAX_ZOOM);
-    cam.x = clamp(cam.x, 0, WORLD);
-    cam.y = clamp(cam.y, 0, WORLD);
+  function project(lon, lat) {
+    const c = Math.cos(lat);
+    const vx = c * Math.sin(lon);
+    const vy = Math.sin(lat);
+    const vz = c * Math.cos(lon);
+    const cl = Math.cos(cam.lon);
+    const sl = Math.sin(cam.lon);
+    const x1 = cl * vx - sl * vz;
+    const z1 = sl * vx + cl * vz;
+    const cb = Math.cos(cam.lat);
+    const sb = Math.sin(cam.lat);
+    const y2 = cb * vy - sb * z1;
+    const z2 = sb * vy + cb * z1;
+    return { x: W / 2 + cam.R * x1, y: H / 2 - cam.R * y2, z: z2 };
   }
 
-  let lastZoomChange = 0;
-  function zoomAt(sx, sy, factor) {
-    const w = screenToWorld(sx, sy);
-    cam.zoom = clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM);
-    cam.x = w.x - (sx - W / 2) / cam.zoom;
-    cam.y = w.y - (sy - H / 2) / cam.zoom;
-    clampCam();
-    lastZoomChange = performance.now();
-    requestRender();
-  }
-  function setZoom(z) {
-    cam.zoom = clamp(z, MIN_ZOOM, MAX_ZOOM);
-    clampCam();
-    lastZoomChange = performance.now();
-    requestRender();
-  }
-  function teleport(region) {
-    cam.x = region.x + REGION / 2;
-    cam.y = region.y + REGION / 2;
-    setZoom(clamp((Math.min(W, H) / REGION) * 0.92, MIN_ZOOM, 1));
-    showBanner(`${region.name} · ${region.label}`);
+  function unproject(sx, sy) {
+    const x = (sx - W / 2) / cam.R;
+    const y = -(sy - H / 2) / cam.R;
+    const d2 = x * x + y * y;
+    if (d2 > 1) return null;
+    const z = Math.sqrt(1 - d2);
+    const cb = Math.cos(cam.lat);
+    const sb = Math.sin(cam.lat);
+    const y1 = cb * y + sb * z;
+    const z1 = -sb * y + cb * z;
+    const cl = Math.cos(cam.lon);
+    const sl = Math.sin(cam.lon);
+    const vx = cl * x + sl * z1;
+    const vz = -sl * x + cl * z1;
+    return { lon: Math.atan2(vx, vz), lat: Math.asin(clamp(y1, -1, 1)) };
   }
 
-  // ------------------------------------------------------------ stroke styling
-  function effSize(s, reg) {
-    let w = s.size;
-    if (reg.fx === 'giant') w *= 5;
-    else if (reg.fx === 'tiny') w = Math.max(0.6, w * 0.25);
-    else if (reg.fx === 'pixel') w = Math.max(32, Math.round(w / 10) * 32);
-    return w;
-  }
-  function invertHex(hex) {
-    const n = parseInt(hex.slice(1), 16);
-    const v = 0xffffff ^ n;
-    return `#${v.toString(16).padStart(6, '0')}`;
-  }
-  function pastel(hex) {
-    const n = parseInt(hex.slice(1), 16);
-    const mix = (c) => Math.round(c * 0.55 + 255 * 0.45);
-    return `rgb(${mix(n >> 16)},${mix((n >> 8) & 255)},${mix(n & 255)})`;
-  }
-  function strokeColor(s, reg) {
-    if (s.erase) return reg.bg;
-    if (reg.fx === 'blueprint') return '#e0f2fe';
-    if (s.color === 'rainbow') return '#f43f5e';
-    if (reg.fx === 'invert') return invertHex(s.color);
-    if (reg.fx === 'chalk') return pastel(s.color);
-    return s.color;
+  function screenToMap(sx, sy) {
+    const p = unproject(sx, sy);
+    if (!p) return null;
+    return { x: lonToX(p.lon), y: latToY(p.lat) };
   }
 
-  function wobblePoints(p, w) {
-    const out = new Array(p.length);
-    const amp = w * 0.6 + 2;
-    for (let i = 0; i < p.length; i += 2) {
-      out[i] = p[i] + Math.sin(p[i + 1] / 24) * amp;
-      out[i + 1] = p[i + 1] + Math.cos(p[i] / 24) * amp;
+  // The chunk of the planet the screen is currently showing, in map units.
+  function visibleWindow() {
+    const pts = [];
+    const steps = 14;
+    for (let i = 0; i <= steps; i++) {
+      const f = i / steps;
+      for (const [sx, sy] of [[f * W, 0], [f * W, H], [0, f * H], [W, f * H]]) {
+        const p = unproject(sx, sy);
+        if (p) pts.push(p);
+      }
     }
-    return out;
-  }
-  function glitchPoints(p, w, id) {
-    const r = rng(hash32(id));
-    const out = new Array(p.length);
-    let ox = 0;
-    for (let i = 0; i < p.length; i += 2) {
-      if (i % 12 === 0) ox = r() < 0.45 ? (r() - 0.5) * Math.max(w * 6, 30) : 0;
-      out[i] = p[i] + ox;
-      out[i + 1] = p[i + 1];
+    const mid = unproject(W / 2, H / 2);
+    if (mid) pts.push(mid);
+    if (!pts.length) return { x0: 0, y0: 0, w: MW, h: MH };
+    let dmin = Infinity;
+    let dmax = -Infinity;
+    let laMin = Infinity;
+    let laMax = -Infinity;
+    for (const p of pts) {
+      const d = wrapPi(p.lon - cam.lon);
+      if (d < dmin) dmin = d;
+      if (d > dmax) dmax = d;
+      if (p.lat < laMin) laMin = p.lat;
+      if (p.lat > laMax) laMax = p.lat;
     }
-    return out;
-  }
-
-  function polyline(c, p) {
-    c.beginPath();
-    if (p.length === 2) {
-      c.arc(p[0], p[1], c.lineWidth / 2, 0, Math.PI * 2);
-      c.fill();
-      return;
+    // A visible pole means every meridian is on screen.
+    let poleN = project(0, PI / 2);
+    let poleS = project(0, -PI / 2);
+    const onScreen = (p) => p.z > 0 && p.x > -20 && p.x < W + 20 && p.y > -20 && p.y < H + 20;
+    let full = false;
+    if (onScreen(poleN)) {
+      laMax = PI / 2;
+      full = true;
     }
-    c.moveTo(p[0], p[1]);
-    if (p.length === 4) {
-      c.lineTo(p[2], p[3]);
+    if (onScreen(poleS)) {
+      laMin = -PI / 2;
+      full = true;
+    }
+    const mLat = (laMax - laMin) * 0.18 + 0.004;
+    laMax = Math.min(PI / 2, laMax + mLat);
+    laMin = Math.max(-PI / 2, laMin - mLat);
+    let y0 = latToY(laMax);
+    let h = latToY(laMin) - y0;
+    let x0;
+    let w;
+    if (full || dmax - dmin > TAU * 0.92) {
+      x0 = 0;
+      w = MW;
     } else {
-      for (let i = 2; i < p.length - 2; i += 2) {
-        c.quadraticCurveTo(p[i], p[i + 1], (p[i] + p[i + 2]) / 2, (p[i + 1] + p[i + 3]) / 2);
+      const mLon = (dmax - dmin) * 0.18 + 0.004;
+      x0 = lonToX(cam.lon) + ((dmin - mLon) / TAU) * MW;
+      w = ((dmax - dmin + mLon * 2) / TAU) * MW;
+      if (w > MW) {
+        x0 = 0;
+        w = MW;
       }
-      c.lineTo(p[p.length - 2], p[p.length - 1]);
     }
-    c.stroke();
+    return { x0, y0, w: Math.max(w, 8), h: Math.max(h, 8) };
   }
 
-  function path(c, p, w, color, rainbow, id) {
-    c.lineWidth = w;
-    if (!rainbow) {
-      c.strokeStyle = color;
-      c.fillStyle = color;
-      polyline(c, p);
+  const overview = makeView(2048, 1024, true);
+  const detail = makeView(
+    Math.min(window.innerWidth, window.innerHeight) * Math.min(window.devicePixelRatio || 1, 2) > 900 ? 2048 : 1024,
+    null,
+    false
+  );
+
+  function useOverview() {
+    return cam.R < Rcover() * 1.06;
+  }
+
+  function ensureViews() {
+    if (!overview.valid) rebuildView(overview, { x0: 0, y0: 0, w: MW, h: MH });
+    if (useOverview()) return overview;
+    const need = visibleWindow();
+    const v = detail;
+    const cur = v.win;
+    const stale =
+      !v.valid ||
+      !cur ||
+      need.y0 < cur.y0 ||
+      need.y0 + need.h > cur.y0 + cur.h ||
+      need.x0 < cur.x0 ||
+      need.x0 + need.w > cur.x0 + cur.w ||
+      cur.w > need.w * 2.6 ||
+      cur.h > need.h * 2.6;
+    if (stale) {
+      const pad = 0.22;
+      const win = {
+        x0: need.x0 - need.w * pad,
+        y0: Math.max(0, need.y0 - need.h * pad),
+        w: Math.min(MW, need.w * (1 + pad * 2)),
+        h: need.h * (1 + pad * 2),
+      };
+      if (win.y0 + win.h > MH) win.h = MH - win.y0;
+      if (win.w >= MW) win.x0 = 0;
+      rebuildView(v, win);
+    }
+    return v;
+  }
+
+  // ============================================================== webgl globe
+  let gl = null;
+  let prog = null;
+  let uni = {};
+  let posBuf = null;
+  let idxBuf = null;
+  let glFail = false;
+
+  const VS = `
+attribute vec2 aLL;
+uniform float uCl, uSl, uCb, uSb, uR;
+uniform vec2 uHalf;
+varying vec2 vLL;
+varying float vZ;
+void main() {
+  float c = cos(aLL.y);
+  vec3 v = vec3(c * sin(aLL.x), sin(aLL.y), c * cos(aLL.x));
+  float x1 = uCl * v.x - uSl * v.z;
+  float z1 = uSl * v.x + uCl * v.z;
+  float y2 = uCb * v.y - uSb * z1;
+  float z2 = uSb * v.y + uCb * z1;
+  vLL = aLL;
+  vZ = z2;
+  gl_Position = vec4(uR * x1 / uHalf.x, uR * y2 / uHalf.y, 0.0, 1.0);
+}`;
+
+  const FS = `
+precision highp float;
+varying vec2 vLL;
+varying float vZ;
+uniform sampler2D uTex;
+uniform vec4 uWin;
+uniform float uShade;
+void main() {
+  if (vZ <= 0.0) discard;
+  float d = vLL.x - uWin.x;
+  d = d - 6.283185307 * floor(d / 6.283185307);
+  float u = d / uWin.y;
+  float v = (uWin.z - vLL.y) / uWin.w;
+  vec3 c = texture2D(uTex, vec2(u, v)).rgb;
+  float sh = mix(1.0, 0.62 + 0.38 * sqrt(max(vZ, 0.0)), uShade);
+  gl_FragColor = vec4(c * sh, 1.0);
+}`;
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || 'shader');
+    return s;
+  }
+
+  function initGL() {
+    try {
+      gl = glCanvas.getContext('webgl', { antialias: true, alpha: true, depth: false });
+      if (!gl) throw new Error('no webgl');
+      prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link');
+      gl.useProgram(prog);
+      for (const n of ['uCl', 'uSl', 'uCb', 'uSb', 'uR', 'uHalf', 'uWin', 'uShade', 'uTex']) {
+        uni[n] = gl.getUniformLocation(prog, n);
+      }
+      uni.aLL = gl.getAttribLocation(prog, 'aLL');
+      posBuf = gl.createBuffer();
+      idxBuf = gl.createBuffer();
+      gl.enableVertexAttribArray(uni.aLL);
+      gl.uniform1i(uni.uTex, 0);
+      gl.clearColor(0, 0, 0, 0);
+    } catch (err) {
+      glFail = true;
+      gl = null;
+      console.error('WebGL unavailable', err);
+    }
+  }
+
+  function buildMesh(v) {
+    if (!gl) return;
+    const lon0 = xToLon(v.win.x0);
+    const lonSpan = (v.win.w / MW) * TAU;
+    const latTop = yToLat(v.win.y0);
+    const latSpan = (v.win.h / MH) * PI;
+    const nx = v.whole ? 160 : 60;
+    const ny = v.whole ? 80 : 60;
+    const verts = new Float32Array((nx + 1) * (ny + 1) * 2);
+    let o = 0;
+    for (let j = 0; j <= ny; j++) {
+      const lat = latTop - (j / ny) * latSpan;
+      for (let i = 0; i <= nx; i++) {
+        verts[o++] = lon0 + (i / nx) * lonSpan;
+        verts[o++] = lat;
+      }
+    }
+    const idx = new Uint16Array(nx * ny * 6);
+    let m = 0;
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i < nx; i++) {
+        const a = j * (nx + 1) + i;
+        const b = a + 1;
+        const c = a + nx + 1;
+        const d = c + 1;
+        idx[m++] = a; idx[m++] = c; idx[m++] = b;
+        idx[m++] = b; idx[m++] = c; idx[m++] = d;
+      }
+    }
+    v.mesh = { count: idx.length, verts, idx };
+  }
+
+  function uploadTexture(v) {
+    if (!gl) return;
+    if (!v.tex) {
+      v.tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, v.tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, v.whole ? gl.REPEAT : gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, v.whole ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+      v.full = true;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, v.tex);
+    if (v.full) {
+      compositeRect(v, 0, 0, v.cw, v.ch);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v.comp);
+      if (v.whole) gl.generateMipmap(gl.TEXTURE_2D);
+      v.full = false;
+      v.dirty = null;
       return;
     }
-    const base = hash32(id) % 360;
-    if (p.length === 2) {
-      c.fillStyle = `hsl(${base} 90% 55%)`;
-      polyline(c, p);
+    if (!v.dirty) return;
+    const d = v.dirty;
+    v.dirty = null;
+    const w = d.x1 - d.x0;
+    const h = d.y1 - d.y0;
+    if (w > 1024 || h > 1024) {
+      compositeRect(v, 0, 0, v.cw, v.ch);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v.comp);
+      if (v.whole) gl.generateMipmap(gl.TEXTURE_2D);
       return;
     }
-    let len = 0;
-    for (let i = 2; i < p.length; i += 2) {
-      const dx = p[i] - p[i - 2];
-      const dy = p[i + 1] - p[i - 1];
-      len += Math.hypot(dx, dy);
-      c.strokeStyle = `hsl(${(base + len * 0.9) % 360} 90% 55%)`;
-      c.beginPath();
-      c.moveTo(p[i - 2], p[i - 1]);
-      c.lineTo(p[i], p[i + 1]);
-      c.stroke();
+    compositeRect(v, d.x0, d.y0, d.x1, d.y1);
+    if (v.scratch.width !== w || v.scratch.height !== h) {
+      v.scratch.width = w;
+      v.scratch.height = h;
     }
+    const sc = v.scratch.getContext('2d');
+    sc.clearRect(0, 0, w, h);
+    sc.drawImage(v.comp, d.x0, d.y0, w, h, 0, 0, w, h);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, d.x0, d.y0, gl.RGBA, gl.UNSIGNED_BYTE, v.scratch);
+    if (v.whole) gl.generateMipmap(gl.TEXTURE_2D);
   }
 
-  function drawBlocks(c, p, w, color, rainbow, id) {
-    const grid = 32;
-    const half = w / 2;
-    const done = new Set();
-    const base = hash32(id) % 360;
-    let len = 0;
-    c.fillStyle = color;
-    const fillAt = (x, y) => {
-      const cx = Math.floor(x / grid);
-      const cy = Math.floor(y / grid);
-      const key = cx * 100000 + cy;
-      if (done.has(key)) return;
-      done.add(key);
-      if (rainbow) c.fillStyle = `hsl(${(base + len * 0.9) % 360} 90% 55%)`;
-      c.fillRect(cx * grid + grid / 2 - half, cy * grid + grid / 2 - half, w, w);
-    };
-    fillAt(p[0], p[1]);
-    for (let i = 2; i < p.length; i += 2) {
-      const x0 = p[i - 2];
-      const y0 = p[i - 1];
-      const dx = p[i] - x0;
-      const dy = p[i + 1] - y0;
-      const d = Math.hypot(dx, dy);
-      const steps = Math.max(1, Math.ceil(d / (grid / 2)));
-      for (let k = 1; k <= steps; k++) {
-        len += d / steps;
-        fillAt(x0 + (dx * k) / steps, y0 + (dy * k) / steps);
-      }
+  function renderGlobe(v) {
+    if (!gl) return;
+    if (!v.mesh || v.meshWin !== v.win) {
+      buildMesh(v);
+      v.meshWin = v.win;
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, v.mesh.verts, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, v.mesh.idx, gl.STATIC_DRAW);
+      v.uploadedMesh = true;
+      lastMeshView = v;
+    } else if (lastMeshView !== v) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, v.mesh.verts, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, v.mesh.idx, gl.STATIC_DRAW);
+      lastMeshView = v;
     }
+    uploadTexture(v);
+    gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.vertexAttribPointer(uni.aLL, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+    gl.uniform1f(uni.uCl, Math.cos(cam.lon));
+    gl.uniform1f(uni.uSl, Math.sin(cam.lon));
+    gl.uniform1f(uni.uCb, Math.cos(cam.lat));
+    gl.uniform1f(uni.uSb, Math.sin(cam.lat));
+    gl.uniform1f(uni.uR, cam.R * dpr);
+    gl.uniform2f(uni.uHalf, glCanvas.width / 2, glCanvas.height / 2);
+    gl.uniform4f(
+      uni.uWin,
+      xToLon(v.win.x0),
+      (v.win.w / MW) * TAU,
+      yToLat(v.win.y0),
+      (v.win.h / MH) * PI
+    );
+    const shade = clamp((Rcover() * 1.9 - cam.R) / (Rcover() * 1.1), 0, 1);
+    gl.uniform1f(uni.uShade, shade);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, v.tex);
+    gl.drawElements(gl.TRIANGLES, v.mesh.count, gl.UNSIGNED_SHORT, 0);
   }
+  let lastMeshView = null;
 
-  function drawSpray(c, p, w, color, id, rainbow) {
-    const r = rng(hash32(id) ^ 0x5bd1e995);
-    const base = hash32(id) % 360;
-    const radius = w * 1.4 + 2;
-    c.fillStyle = color;
-    for (let i = 0; i < p.length; i += 2) {
-      if (rainbow) c.fillStyle = `hsl(${(base + i * 6) % 360} 90% 55%)`;
-      for (let k = 0; k < 6; k++) {
-        const a = r() * Math.PI * 2;
-        const d = Math.sqrt(r()) * radius;
-        const dot = w * 0.06 + r() * w * 0.14 + 0.4;
-        c.beginPath();
-        c.arc(p[i] + Math.cos(a) * d, p[i + 1] + Math.sin(a) * d, dot, 0, Math.PI * 2);
-        c.fill();
-      }
-    }
-  }
-
-  function drawDrips(c, p, w, color) {
-    const r = rng(hash32(color + p.length) ^ 0x9e3779b9);
-    c.strokeStyle = color;
-    c.fillStyle = color;
-    c.lineWidth = Math.max(1, w * 0.35);
-    for (let i = 0; i < p.length; i += 2) {
-      if (r() > 0.18 && i < p.length - 2) continue;
-      const len = Math.max(w, 6) * (2 + r() * 8);
-      c.beginPath();
-      c.moveTo(p[i], p[i + 1]);
-      c.lineTo(p[i], p[i + 1] + len);
-      c.stroke();
-      c.beginPath();
-      c.arc(p[i], p[i + 1] + len, w * 0.3, 0, Math.PI * 2);
-      c.fill();
-    }
-  }
-
-  function drawStyled(c, s, reg, res) {
-    const fx = reg.fx;
-    const w = effSize(s, reg);
-    const color = strokeColor(s, reg);
-    const rainbow = !s.erase && (fx === 'rainbow' || s.color === 'rainbow');
-    let pts = s.points;
-    if (fx === 'wobble') pts = wobblePoints(pts, w);
-    else if (fx === 'glitch') pts = glitchPoints(pts, w, s.id);
-    c.lineCap = fx === 'pixel' ? 'square' : 'round';
-    c.lineJoin = fx === 'pixel' ? 'miter' : 'round';
-    if (fx === 'void' && !s.erase) {
-      c.shadowColor = rainbow ? '#ffffff' : color;
-      c.shadowBlur = w * 1.5 * res;
-    }
-    if (fx === 'pixel') {
-      drawBlocks(c, pts, w, color, rainbow, s.id);
-      return;
-    }
-    if (s.k === 's') {
-      drawSpray(c, pts, w, color, s.id, rainbow);
-      return;
-    }
-    if (fx === 'echo' && !s.erase) {
-      const a0 = c.globalAlpha;
-      for (const [k, a] of [[3, 0.15], [2, 0.3], [1, 0.5]]) {
-        c.save();
-        c.globalAlpha = a0 * a;
-        c.translate(k * Math.max(w * 0.9, 6), k * Math.max(w * 0.9, 6));
-        path(c, pts, w, color, rainbow, s.id);
-        c.restore();
-      }
-    }
-    if (fx === 'sketch' && !s.erase) {
-      const r = rng(hash32(s.id));
-      c.globalAlpha *= 0.45;
-      for (let i = 0; i < 3; i++) {
-        c.save();
-        c.translate((r() - 0.5) * w * 1.2, (r() - 0.5) * w * 1.2);
-        path(c, pts, w * 0.7, color, rainbow, s.id);
-        c.restore();
-      }
-      return;
-    }
-    path(c, pts, w, color, rainbow, s.id);
-    if (fx === 'gravity' && !s.erase) drawDrips(c, pts, w, rainbow ? `hsl(${hash32(s.id) % 360} 90% 55%)` : color);
-  }
-
-  function drawStroke(c, s, res) {
-    const p = s.points;
-    if (p.length < 2) return;
-    const reg = s.region || (s.region = regionAt(p[0], p[1]));
-    let alpha = 1;
-    if (reg.fx === 'tides') {
-      alpha = 1 - (Date.now() - s.t) / TIDE_MS;
-      if (alpha <= 0) return;
-    }
-    c.save();
-    c.globalAlpha = alpha;
-    if (reg.fx === 'mirror') {
-      const cx = reg.x + REGION / 2;
-      const cy = reg.y + REGION / 2;
-      for (let k = 0; k < 4; k++) {
-        for (let m = 0; m < 2; m++) {
-          c.save();
-          c.translate(cx, cy);
-          c.rotate((k * Math.PI) / 2);
-          if (m) c.scale(-1, 1);
-          c.translate(-cx, -cy);
-          drawStyled(c, s, reg, res);
-          c.restore();
-        }
-      }
-    } else {
-      drawStyled(c, s, reg, res);
-    }
-    c.restore();
-  }
-
-  // ------------------------------------------------------------ geometry
-  function strokeBounds(s) {
-    const p = s.points;
-    const reg = s.region || (s.region = regionAt(p[0], p[1]));
-    const w = effSize(s, reg);
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (let i = 0; i < p.length; i += 2) {
-      if (p[i] < minX) minX = p[i];
-      if (p[i] > maxX) maxX = p[i];
-      if (p[i + 1] < minY) minY = p[i + 1];
-      if (p[i + 1] > maxY) maxY = p[i + 1];
-    }
-    let pad = w / 2 + 3;
-    switch (reg.fx) {
-      case 'void': pad += w * 2; break;
-      case 'wobble': pad += w + 2; break;
-      case 'glitch': pad += Math.max(w * 3, 16); break;
-      case 'sketch': pad += w; break;
-      case 'pixel': pad += 40; break;
-      default: break;
-    }
-    if (s.k === 's') pad += w * 1.5 + 2;
-    minX -= pad;
-    minY -= pad;
-    maxX += pad;
-    maxY += pad;
-    if (reg.fx === 'echo') {
-      maxX += Math.max(w * 0.9, 6) * 3.5;
-      maxY += Math.max(w * 0.9, 6) * 3.5;
-    }
-    if (reg.fx === 'gravity') maxY += Math.max(w, 6) * 11;
-    if (reg.fx === 'mirror') {
-      const cx = reg.x + REGION / 2;
-      const cy = reg.y + REGION / 2;
-      const corners = [[minX, minY], [maxX, minY], [minX, maxY], [maxX, maxY]];
-      let a = Infinity;
-      let b = Infinity;
-      let cMax = -Infinity;
-      let d = -Infinity;
-      for (let k = 0; k < 4; k++) {
-        for (let m = 0; m < 2; m++) {
-          for (const [x, y] of corners) {
-            let tx = x - cx;
-            let ty = y - cy;
-            if (m) tx = -tx;
-            for (let i = 0; i < k; i++) {
-              const nx = -ty;
-              ty = tx;
-              tx = nx;
-            }
-            const fx = tx + cx;
-            const fy = ty + cy;
-            if (fx < a) a = fx;
-            if (fy < b) b = fy;
-            if (fx > cMax) cMax = fx;
-            if (fy > d) d = fy;
-          }
-        }
-      }
-      minX = a;
-      minY = b;
-      maxX = cMax;
-      maxY = d;
-    }
-    return { minX, minY, maxX, maxY };
-  }
-
-  function tilesFor(bounds, size, count, sep) {
-    const x0 = clamp(Math.floor(bounds.minX / size), 0, count - 1);
-    const x1 = clamp(Math.floor(bounds.maxX / size), 0, count - 1);
-    const y0 = clamp(Math.floor(bounds.minY / size), 0, count - 1);
-    const y1 = clamp(Math.floor(bounds.maxY / size), 0, count - 1);
-    const keys = [];
-    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) keys.push(`${x}${sep}${y}`);
-    return keys;
-  }
-
-  // ------------------------------------------------------------ stroke store
-  function drawStrokeToBitmap(bm, s) {
-    bm.cx.setTransform(bm.res, 0, 0, bm.res, -bm.tx * TILE * bm.res, -bm.ty * TILE * bm.res);
-    drawStroke(bm.cx, s, bm.res);
-  }
-
-  function commitStroke(s) {
-    if (strokes.has(s.id)) return;
-    strokes.set(s.id, s);
-    order.push(s.id);
-    const b = strokeBounds(s);
-    s.tiles = tilesFor(b, TILE, N, ',');
-    s.stiles = tilesFor({ minX: s.points[0], minY: s.points[1], maxX: s.points[0], maxY: s.points[1] }, STILE, SN, '_');
-    for (const k of s.stiles) tileRec(k).ids.add(s.id);
-    for (const k of s.tiles) {
-      let arr = tileIndex.get(k);
-      if (!arr) tileIndex.set(k, (arr = []));
-      arr.push(s.id);
-      const bm = bitmaps.get(k);
-      if (bm && !bm.dirty) drawStrokeToBitmap(bm, s);
-    }
-    requestRender();
-  }
-
-  function removeStroke(id) {
-    const s = strokes.get(id);
-    if (!s) return;
-    strokes.delete(id);
-    const i = order.indexOf(id);
-    if (i >= 0) order.splice(i, 1);
-    for (const k of s.stiles || []) {
-      const rec = store.get(k);
-      if (rec) rec.ids.delete(id);
-    }
-    for (const k of s.tiles) {
-      const arr = tileIndex.get(k);
-      if (arr) {
-        const j = arr.indexOf(id);
-        if (j >= 0) arr.splice(j, 1);
-      }
-      const bm = bitmaps.get(k);
-      if (bm) bm.dirty = true;
-    }
-    requestRender();
-  }
-
-  function tileRec(key) {
-    let rec = store.get(key);
-    if (!rec) {
-      rec = { ids: new Set(), dead: new Set(), deadList: [], min: 0, pubTimer: null, lastPub: 0, lastPayload: '' };
-      store.set(key, rec);
-    }
-    return rec;
-  }
-
-  function tombstone(rec, id) {
-    if (rec.dead.has(id)) return;
-    rec.dead.add(id);
-    rec.deadList.push(id);
-    while (rec.deadList.length > DEAD_CAP) rec.dead.delete(rec.deadList.shift());
-  }
-
-  function deleteStroke(id) {
-    const s = strokes.get(id);
-    if (!s) return;
-    for (const k of s.stiles) {
-      tombstone(tileRec(k), id);
-      schedulePublish(k);
-    }
-    removeStroke(id);
-  }
-
-  const isExpired = (s) => s.region && s.region.fx === 'tides' && Date.now() - s.t > TIDE_MS;
-
-  // ------------------------------------------------------------ tiles
-  function desiredRes() {
-    const raw = cam.zoom * dpr;
-    const q = Math.pow(2, Math.round(Math.log2(raw)));
-    return clamp(q, 1 / 16, 4);
-  }
-
-  function renderTile(key, res) {
-    let bm = bitmaps.get(key);
-    const px = Math.max(1, Math.ceil(TILE * res));
-    if (!bm) {
-      const [tx, ty] = key.split(',').map(Number);
-      const cv = document.createElement('canvas');
-      bm = { cv, cx: cv.getContext('2d'), tx, ty, res: 0, dirty: true, used: 0 };
-      bitmaps.set(key, bm);
-    }
-    if (bm.cv.width !== px) {
-      bm.cv.width = px;
-      bm.cv.height = px;
-    }
-    bm.res = res;
-    const c = bm.cx;
+  // ============================================================== overlay
+  function paintStars() {
+    const c = stars.getContext('2d');
     c.setTransform(1, 0, 0, 1, 0, 0);
-    c.fillStyle = regionAt(bm.tx * TILE, bm.ty * TILE).bg;
-    c.fillRect(0, 0, px, px);
-    c.setTransform(res, 0, 0, res, -bm.tx * TILE * res, -bm.ty * TILE * res);
-    const ids = tileIndex.get(key);
-    if (ids) {
-      for (const id of ids) {
-        const s = strokes.get(id);
-        if (s) drawStroke(c, s, res);
-      }
+    c.fillStyle = COL.space;
+    c.fillRect(0, 0, stars.width, stars.height);
+    const r = rng(12345);
+    const n = Math.round((stars.width * stars.height) / 9000);
+    for (let i = 0; i < n; i++) {
+      const x = r() * stars.width;
+      const y = r() * stars.height;
+      const s = r();
+      c.globalAlpha = 0.25 + s * 0.6;
+      c.fillStyle = s > 0.93 ? '#cfe4ff' : '#ffffff';
+      c.beginPath();
+      c.arc(x, y, (s > 0.93 ? 1.5 : 0.7) * dpr * (0.6 + s * 0.8), 0, TAU);
+      c.fill();
     }
-    bm.dirty = false;
+    c.globalAlpha = 1;
   }
 
-  function evictBitmaps() {
-    if (bitmaps.size < 400) return;
-    for (const [key, bm] of bitmaps) {
-      if (frameNo - bm.used > 90) {
-        bitmaps.delete(key);
-        renderQueue.delete(key);
+  function drawOverlay() {
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    octx.clearRect(0, 0, W, H);
+
+    if (cam.R < Math.hypot(W, H) * 0.75) {
+      const g = octx.createRadialGradient(W / 2, H / 2, cam.R * 0.985, W / 2, H / 2, cam.R * 1.14);
+      g.addColorStop(0, 'rgba(120, 180, 255, 0)');
+      g.addColorStop(0.18, 'rgba(130, 190, 255, 0.28)');
+      g.addColorStop(1, 'rgba(90, 150, 255, 0)');
+      octx.fillStyle = g;
+      octx.beginPath();
+      octx.arc(W / 2, H / 2, cam.R * 1.14, 0, TAU);
+      octx.fill();
+    }
+
+    if (cam.R < Rcover() * 3.2) {
+      octx.textAlign = 'center';
+      octx.textBaseline = 'middle';
+      for (const pl of PLACES) {
+        const p = project(pl.lon * DEG, pl.lat * DEG);
+        if (p.z < 0.18) continue;
+        if (p.x < -60 || p.x > W + 60 || p.y < -20 || p.y > H + 20) continue;
+        const a = clamp((p.z - 0.18) * 3, 0, 1) * 0.85;
+        octx.globalAlpha = a;
+        octx.font = `${pl.land ? 700 : 500} ${pl.land ? 12 : 11}px -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif`;
+        octx.lineWidth = 3;
+        octx.strokeStyle = 'rgba(255,255,255,0.7)';
+        octx.strokeText(pl.name, p.x, p.y);
+        octx.fillStyle = pl.land ? '#3c4a2e' : '#2b4b6b';
+        octx.fillText(pl.name, p.x, p.y);
       }
+      octx.globalAlpha = 1;
+    }
+
+    const now = performance.now();
+    for (const [id, cur] of cursors) {
+      if (now - cur.t > 9000) {
+        cursors.delete(id);
+        continue;
+      }
+      const p = project(xToLon(cur.x), yToLat(cur.y));
+      if (p.z <= 0.02 || p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20) continue;
+      octx.beginPath();
+      octx.arc(p.x, p.y, 6, 0, TAU);
+      octx.fillStyle = cur.c;
+      octx.fill();
+      octx.lineWidth = 2;
+      octx.strokeStyle = 'rgba(255,255,255,0.9)';
+      octx.stroke();
     }
   }
 
-  // ------------------------------------------------------------ render loop
+  // ============================================================== render loop
   let renderPending = false;
-  let frameNo = 0;
+  let curView = null;
+  let lastError = null;
 
   function requestRender() {
     if (renderPending) return;
@@ -622,221 +1030,133 @@
     requestAnimationFrame(frame);
   }
 
-  let lastError = null;
   function frame() {
     renderPending = false;
     try {
-      frameBody();
+      const v = ensureViews();
+      curView = v;
+      renderGlobe(v);
+      drawOverlay();
     } catch (err) {
       lastError = err;
-      console.error('render error', err);
-      setTimeout(requestRender, 250);
+      console.error('render', err);
     }
-  }
-
-  function frameBody() {
-    frameNo++;
-    const res = desiredRes();
-    const zooming = performance.now() - lastZoomChange < 160;
-    const start = performance.now();
-    for (const key of renderQueue) {
-      const bm = bitmaps.get(key);
-      if (bm && !bm.dirty && zooming) continue;
-      renderTile(key, res);
-      renderQueue.delete(key);
-      if (performance.now() - start > 8) break;
-    }
-    draw();
-    if (frameNo % 60 === 0) evictBitmaps();
-    if (renderQueue.size || activeStrokes.size || cursors.size) requestRender();
+    updateHud();
     updateHash();
-    updateRegionPill();
+    if (activeStrokes.size || cursors.size) requestRender();
   }
 
-  function draw() {
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#cbd5e1';
-    ctx.fillRect(0, 0, W, H);
-
-    const tl = screenToWorld(0, 0);
-    const br = screenToWorld(W, H);
-    const rx0 = clamp(Math.floor(tl.x / REGION), 0, RN - 1);
-    const rx1 = clamp(Math.floor(br.x / REGION), 0, RN - 1);
-    const ry0 = clamp(Math.floor(tl.y / REGION), 0, RN - 1);
-    const ry1 = clamp(Math.floor(br.y / REGION), 0, RN - 1);
-    for (let ry = ry0; ry <= ry1; ry++) {
-      for (let rx = rx0; rx <= rx1; rx++) {
-        const reg = REGIONS[ry * RN + rx];
-        const sx0 = worldToScreenX(reg.x);
-        const sy0 = worldToScreenY(reg.y);
-        const sx1 = worldToScreenX(reg.x + REGION);
-        const sy1 = worldToScreenY(reg.y + REGION);
-        ctx.fillStyle = reg.bg;
-        ctx.fillRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
-      }
-    }
-
-    wantStorage(tl, br);
-    const res = desiredRes();
-    const tx0 = clamp(Math.floor(tl.x / TILE), 0, N - 1);
-    const tx1 = clamp(Math.floor(br.x / TILE), 0, N - 1);
-    const ty0 = clamp(Math.floor(tl.y / TILE), 0, N - 1);
-    const ty1 = clamp(Math.floor(br.y / TILE), 0, N - 1);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    for (let ty = ty0; ty <= ty1; ty++) {
-      const sy0 = worldToScreenY(ty * TILE);
-      const sy1 = worldToScreenY((ty + 1) * TILE);
-      for (let tx = tx0; tx <= tx1; tx++) {
-        const key = `${tx},${ty}`;
-        const ids = tileIndex.get(key);
-        if (!ids || !ids.length) continue;
-        const bm = bitmaps.get(key);
-        if (!bm || bm.dirty || bm.res !== res) renderQueue.add(key);
-        if (bm) {
-          bm.used = frameNo;
-          const sx0 = worldToScreenX(tx * TILE);
-          const sx1 = worldToScreenX((tx + 1) * TILE);
-          ctx.drawImage(bm.cv, sx0, sy0, sx1 - sx0, sy1 - sy0);
-        }
-      }
-    }
-
-    // Region borders and, when zoomed out, their names.
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
-    ctx.lineWidth = 1;
-    for (let rx = rx0; rx <= rx1 + 1; rx++) {
-      const sx = Math.round(worldToScreenX(rx * REGION)) + 0.5;
-      ctx.beginPath();
-      ctx.moveTo(sx, 0);
-      ctx.lineTo(sx, H);
-      ctx.stroke();
-    }
-    for (let ry = ry0; ry <= ry1 + 1; ry++) {
-      const sy = Math.round(worldToScreenY(ry * REGION)) + 0.5;
-      ctx.beginPath();
-      ctx.moveTo(0, sy);
-      ctx.lineTo(W, sy);
-      ctx.stroke();
-    }
-    if (cam.zoom < 0.35) {
-      const fs = clamp(REGION * cam.zoom * 0.05, 11, 40);
-      ctx.font = `700 ${fs}px -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      for (let ry = ry0; ry <= ry1; ry++) {
-        for (let rx = rx0; rx <= rx1; rx++) {
-          const reg = REGIONS[ry * RN + rx];
-          const cx = worldToScreenX(reg.x + REGION / 2);
-          const cy = worldToScreenY(reg.y + REGION / 2);
-          ctx.fillStyle = isDark(reg.bg) ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.32)';
-          ctx.fillText(reg.name, cx, cy - fs * 0.6);
-          ctx.font = `500 ${fs * 0.7}px -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif`;
-          ctx.fillText(reg.label, cx, cy + fs * 0.6);
-          ctx.font = `700 ${fs}px -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif`;
-        }
-      }
-    }
-
-    if (activeStrokes.size) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(worldToScreenX(0), worldToScreenY(0), WORLD * cam.zoom, WORLD * cam.zoom);
-      ctx.clip();
-      ctx.translate(W / 2, H / 2);
-      ctx.scale(cam.zoom, cam.zoom);
-      ctx.translate(-cam.x, -cam.y);
-      for (const s of activeStrokes.values()) drawStroke(ctx, s, cam.zoom * dpr);
-      ctx.restore();
-    }
-
-    const now = performance.now();
-    for (const [id, cur] of cursors) {
-      if (now - cur.t > 8000) {
-        cursors.delete(id);
-        continue;
-      }
-      const sx = worldToScreenX(cur.x);
-      const sy = worldToScreenY(cur.y);
-      if (sx < -20 || sy < -20 || sx > W + 20 || sy > H + 20) continue;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
-      ctx.fillStyle = cur.c;
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#ffffff';
-      ctx.stroke();
-    }
-
-    zoomLabel.textContent = `${Math.round(cam.zoom * 100)}%`;
-  }
-
-  // ------------------------------------------------------------ url hash
-  let lastHash = '';
-  let lastHashWrite = 0;
-  function updateHash() {
-    const h = `#${Math.round(cam.x)},${Math.round(cam.y)},${cam.zoom.toFixed(3)}`;
-    const now = performance.now();
-    if (h === lastHash || now - lastHashWrite < 500) return;
-    lastHash = h;
-    lastHashWrite = now;
-    history.replaceState(null, '', h);
-  }
-  function readHash() {
-    const m = /^#(-?[\d.]+),(-?[\d.]+),([\d.]+)$/.exec(location.hash);
-    if (!m) return;
-    cam.x = Number(m[1]);
-    cam.y = Number(m[2]);
-    cam.zoom = Number(m[3]);
-    if (![cam.x, cam.y, cam.zoom].every(Number.isFinite)) {
-      cam.x = REGION * 8.5;
-      cam.y = REGION * 8.5;
-      cam.zoom = 1;
-    }
-    clampCam();
-  }
-
-  // ------------------------------------------------------------ drawing
-  const pointers = new Map();
+  // ============================================================== drawing
   let drawing = null;
-  let panning = null;
-  let pinch = null;
-  let spaceDown = false;
   let flushTimer = null;
+  let seq = 0;
+
+  function currentSizeUnits() {
+    return clamp((SIZE_PX[state.sizeIdx] * MW) / (cam.R * TAU), 1.5, 24000);
+  }
+
+  function addStrokeToViews(s) {
+    for (const v of [overview, detail]) {
+      if (!v.valid) continue;
+      if (s.in && s.in.has(v)) continue;
+      drawStrokeInView(v, s);
+    }
+  }
+
+  function commitStroke(s) {
+    if (strokes.has(s.id)) return;
+    strokes.set(s.id, s);
+    addToIndex(s);
+    addStrokeToViews(s);
+    s.in = null;
+    requestRender();
+  }
+
+  function removeStroke(id) {
+    const s = strokes.get(id);
+    if (!s) return;
+    strokes.delete(id);
+    const set = cellIds.get(s.cell);
+    if (set) set.delete(id);
+    const bb = strokeBBox(s);
+    for (const v of [overview, detail]) if (v.valid) repaintArtRect(v, bb.x0, bb.y0, bb.x1, bb.y1);
+    requestRender();
+  }
 
   function startStroke(sx, sy) {
-    const w = screenToWorld(sx, sy);
-    const x = r1(clamp(w.x, 0, WORLD));
-    const y = r1(clamp(w.y, 0, WORLD));
+    const m = screenToMap(sx, sy);
+    if (!m) return;
     const id = `${myId}-${(++seq).toString(36)}`;
-    const s = { id, color: state.color, size: state.size, erase: state.tool === 'eraser', points: [x, y], t: Date.now() };
-    if (state.tool === 'spray') s.k = 's';
-    s.region = regionAt(x, y);
+    const s = {
+      id,
+      color: state.color,
+      size: currentSizeUnits(),
+      erase: state.tool === 'eraser',
+      k: state.tool === 'spray' ? 's' : undefined,
+      t: Date.now(),
+      points: [Math.round(m.x * 10) / 10, Math.round(m.y * 10) / 10],
+      in: new Set(),
+    };
     activeStrokes.set(id, s);
-    drawing = { s, pending: [], lastX: x, lastY: y };
-    sendLive({ t: 'start', id, c: s.color, w: s.size, e: s.erase ? 1 : 0, k: s.k, p: [x, y] });
+    drawing = { s, pending: [], lastX: m.x, lastY: m.y, ox: m.x, oy: m.y };
+    liveDrawSegment(s, s.points);
+    sendLive({ t: 'start', id, c: s.color, w: s.size, e: s.erase ? 1 : 0, k: s.k, p: s.points.slice() });
     requestRender();
+  }
+
+  // Paint just the newest piece of a stroke that is still being drawn.
+  function liveDrawSegment(s, seg) {
+    const v = curView || overview;
+    if (!v.valid) return;
+    const tmp = {
+      id: s.id,
+      color: s.color,
+      size: s.size,
+      erase: s.erase,
+      k: s.k,
+      t: s.t,
+      points: seg,
+      cy0: s.points[1],
+    };
+    const bb = strokeBBox(tmp);
+    if (bb.y1 < v.win.y0 || bb.y0 > v.win.y0 + v.win.h) return;
+    const ctx = v.art.getContext('2d');
+    for (const dx of offsetsFor(v, bb.x0, bb.x1)) paintStroke(ctx, v, tmp, dx);
+    markDirty(v, bb.x0, bb.y0, bb.x1, bb.y1);
+    if (s.in) s.in.add(v);
   }
 
   function addPoint(sx, sy) {
     if (!drawing) return;
-    const w = screenToWorld(sx, sy);
-    const x = r1(clamp(w.x, 0, WORLD));
-    const y = r1(clamp(w.y, 0, WORLD));
-    const dx = x - drawing.lastX;
-    const dy = y - drawing.lastY;
-    const minDist = (drawing.s.k === 's' ? 3 : 1.2) / cam.zoom;
-    if (dx * dx + dy * dy < minDist * minDist) return;
-    if (drawing.s.points.length >= MAX_POINTS * 2) {
+    const m = screenToMap(sx, sy);
+    if (!m) return;
+    let x = m.x;
+    const y = clamp(m.y, 0, MH);
+    // Keep the path continuous when it crosses the date line.
+    x = drawing.lastX + wrapPi(((x - drawing.lastX) / MW) * TAU) * (MW / TAU);
+    const cs = Math.max(0.05, Math.cos(yToLat(clamp(drawing.oy, 0, MH))));
+    const d = Math.hypot((x - drawing.lastX) * cs, y - drawing.lastY);
+    const minD = Math.max(0.6, 1.4 / pxPerUnit()) * (drawing.s.k === 's' ? 2.2 : 1);
+    if (d < minD) return;
+    if (
+      drawing.s.points.length >= MAX_POINTS * 2 ||
+      Math.abs(x - drawing.ox) * cs > MAX_SPAN ||
+      Math.abs(y - drawing.oy) > MAX_SPAN
+    ) {
       endStroke();
       startStroke(sx, sy);
       return;
     }
-    drawing.lastX = x;
-    drawing.lastY = y;
-    drawing.s.points.push(x, y);
-    drawing.pending.push(x, y);
-    if (!flushTimer) flushTimer = setTimeout(flushPending, 40);
+    const rx = Math.round(x * 10) / 10;
+    const ry = Math.round(y * 10) / 10;
+    const seg = [drawing.lastX, drawing.lastY, rx, ry];
+    drawing.lastX = rx;
+    drawing.lastY = ry;
+    drawing.s.points.push(rx, ry);
+    drawing.s.bb = null;
+    drawing.pending.push(rx, ry);
+    liveDrawSegment(drawing.s, seg);
+    if (!flushTimer) flushTimer = setTimeout(flushPending, 45);
     requestRender();
   }
 
@@ -858,37 +1178,50 @@
     const s = drawing.s;
     drawing = null;
     activeStrokes.delete(s.id);
+    s.bb = null;
     commitStroke(s);
     mine.push(s.id);
-    if (mine.length > 500) mine.shift();
-    for (const k of s.stiles) schedulePublish(k);
+    if (mine.length > 400) mine.shift();
+    schedulePublish(s.cell);
     sendLive({ t: 'end', s: packStroke(s) });
   }
 
-  // ------------------------------------------------------------ pointer input
-  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  // ============================================================== input
+  const pointers = new Map();
+  let spin = null;
+  let pinch = null;
+  let spaceDown = false;
 
-  function startPinch() {
-    const [a, b] = [...pointers.values()];
-    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    pinch = { d0: Math.max(dist(a, b), 1), zoom0: cam.zoom, w0: screenToWorld(mid.x, mid.y) };
-  }
-  function updatePinch() {
-    const [a, b] = [...pointers.values()];
-    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    const zoom = clamp(pinch.zoom0 * (dist(a, b) / pinch.d0), MIN_ZOOM, MAX_ZOOM);
-    cam.zoom = zoom;
-    cam.x = pinch.w0.x - (mid.x - W / 2) / zoom;
-    cam.y = pinch.w0.y - (mid.y - H / 2) / zoom;
-    clampCam();
-    lastZoomChange = performance.now();
+  function rotateBy(dx, dy) {
+    cam.lon -= dx / (cam.R * Math.max(0.2, Math.cos(cam.lat)));
+    cam.lat = clamp(cam.lat + dy / cam.R, -PI / 2, PI / 2);
+    cam.lon = wrapPi(cam.lon);
     requestRender();
   }
 
-  canvas.addEventListener('pointerdown', (e) => {
+  function setZoom(R, ax, ay) {
+    const before = ax !== undefined ? unproject(ax, ay) : null;
+    cam.R = clamp(R, Rmin(), Rmax());
+    if (before) {
+      for (let i = 0; i < 4; i++) {
+        const p = project(before.lon, before.lat);
+        if (p.z <= 0) break;
+        const dx = ax - p.x;
+        const dy = ay - p.y;
+        if (Math.abs(dx) < 0.3 && Math.abs(dy) < 0.3) break;
+        rotateBy(-dx, -dy);
+      }
+    }
+    requestRender();
+  }
+
+  const wantsPan = (e) =>
+    state.tool === 'hand' || spaceDown || e.button === 1 || e.button === 2 || !canDraw();
+
+  glCanvas.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     try {
-      canvas.setPointerCapture(e.pointerId);
+      glCanvas.setPointerCapture(e.pointerId);
     } catch {
       /* synthetic pointer */
     }
@@ -898,37 +1231,44 @@
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
     if (pointers.size === 2) {
       if (drawing) endStroke();
-      panning = null;
-      canvas.classList.remove('grabbing');
-      startPinch();
+      spin = null;
+      const [a, b] = [...pointers.values()];
+      pinch = { d0: Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1), R0: cam.R, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
       return;
     }
     if (pointers.size > 2) return;
-    const wantPan = state.tool === 'hand' || spaceDown || e.button === 1 || e.button === 2;
-    if (wantPan) {
-      panning = { sx: e.clientX, sy: e.clientY, cx: cam.x, cy: cam.y };
-      canvas.classList.add('grabbing');
+    if (wantsPan(e)) {
+      spin = { x: e.clientX, y: e.clientY };
+      glCanvas.classList.add('grabbing');
+      if (!canDraw() && e.button === 0 && state.tool !== 'hand') hintZoom();
       return;
     }
     if (e.button !== 0) return;
     startStroke(e.clientX, e.clientY);
   });
 
-  canvas.addEventListener('pointermove', (e) => {
+  glCanvas.addEventListener('pointermove', (e) => {
     const pt = pointers.get(e.pointerId);
     if (pt) {
       pt.x = e.clientX;
       pt.y = e.clientY;
     }
     if (pinch) {
-      if (pointers.size >= 2) updatePinch();
+      if (pointers.size >= 2) {
+        const [a, b] = [...pointers.values()];
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        rotateBy(mx - pinch.mx, my - pinch.my);
+        pinch.mx = mx;
+        pinch.my = my;
+        setZoom(pinch.R0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0));
+      }
       return;
     }
-    if (panning && pt) {
-      cam.x = panning.cx - (e.clientX - panning.sx) / cam.zoom;
-      cam.y = panning.cy - (e.clientY - panning.sy) / cam.zoom;
-      clampCam();
-      requestRender();
+    if (spin && pt) {
+      rotateBy(e.clientX - spin.x, e.clientY - spin.y);
+      spin.x = e.clientX;
+      spin.y = e.clientY;
       return;
     }
     if (drawing && pt) {
@@ -945,47 +1285,29 @@
       if (pointers.size < 2) pinch = null;
       return;
     }
-    if (panning) {
-      panning = null;
-      canvas.classList.remove('grabbing');
+    if (spin) {
+      spin = null;
+      glCanvas.classList.remove('grabbing');
     }
     if (drawing) endStroke();
   }
-  canvas.addEventListener('pointerup', pointerEnd);
-  canvas.addEventListener('pointercancel', pointerEnd);
-  canvas.addEventListener('lostpointercapture', pointerEnd);
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  glCanvas.addEventListener('pointerup', pointerEnd);
+  glCanvas.addEventListener('pointercancel', pointerEnd);
+  glCanvas.addEventListener('lostpointercapture', pointerEnd);
+  glCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  canvas.addEventListener(
+  glCanvas.addEventListener(
     'wheel',
     (e) => {
       e.preventDefault();
-      let dx = e.deltaX;
       let dy = e.deltaY;
-      if (e.deltaMode === 1) {
-        dx *= 16;
-        dy *= 16;
-      } else if (e.deltaMode === 2) {
-        dx *= W;
-        dy *= H;
-      }
-      if (e.ctrlKey || e.metaKey) {
-        zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.01));
-        return;
-      }
-      if (e.shiftKey && dx === 0) {
-        dx = dy;
-        dy = 0;
-      }
-      cam.x += dx / cam.zoom;
-      cam.y += dy / cam.zoom;
-      clampCam();
-      requestRender();
+      if (e.deltaMode === 1) dy *= 16;
+      else if (e.deltaMode === 2) dy *= H;
+      setZoom(cam.R * Math.exp(-dy * 0.0022), e.clientX, e.clientY);
     },
     { passive: false }
   );
 
-  // ------------------------------------------------------------ keyboard
   window.addEventListener('keydown', (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
@@ -999,19 +1321,22 @@
       case 's': case 'S': setTool('spray'); break;
       case 'e': case 'E': setTool('eraser'); break;
       case 'h': case 'H': setTool('hand'); break;
-      case 'm': case 'M': toggleMap(); break;
-      case 'r': case 'R': randomTeleport(); break;
-      case 'f': case 'F': teleport(regionAt(cam.x, cam.y)); break;
-      case '[': stepSize(-1); break;
-      case ']': stepSize(1); break;
-      case '+': case '=': zoomAt(W / 2, H / 2, 1.25); break;
-      case '-': case '_': zoomAt(W / 2, H / 2, 0.8); break;
-      case '0': setZoom(1); break;
-      case 'Escape': help.classList.add('hidden'); map.classList.add('hidden'); break;
+      case 'm': case 'M': togglePlaces(); break;
+      case 'r': case 'R': travelTo(PLACES[Math.floor(Math.random() * PLACES.length)]); break;
+      case '[': setSize(state.sizeIdx - 1); break;
+      case ']': setSize(state.sizeIdx + 1); break;
+      case '+': case '=': setZoom(cam.R * 1.4); break;
+      case '-': case '_': setZoom(cam.R / 1.4); break;
+      case '0': setZoom(Rmin()); break;
+      case 'ArrowLeft': rotateBy(60, 0); break;
+      case 'ArrowRight': rotateBy(-60, 0); break;
+      case 'ArrowUp': rotateBy(0, 60); break;
+      case 'ArrowDown': rotateBy(0, -60); break;
+      case 'Escape': hidePanels(); break;
       case ' ':
         if (!spaceDown) {
           spaceDown = true;
-          canvas.classList.add('grab');
+          glCanvas.classList.add('grab');
         }
         e.preventDefault();
         break;
@@ -1021,19 +1346,19 @@
   window.addEventListener('keyup', (e) => {
     if (e.key === ' ') {
       spaceDown = false;
-      canvas.classList.remove('grab');
+      glCanvas.classList.remove('grab');
     }
   });
 
-  // ------------------------------------------------------------ network (MQTT)
+  // ============================================================== network
   const links = BROKERS.map((url) => ({ url, client: null, ready: false }));
-  const subscribed = new Map();
+  const store = new Map(); // cell key -> { dead, deadList, min, pubTimer, lastPub, lastPayload }
   const seenLive = new Set();
   const seenLiveList = [];
+  let connected = false;
+  let liveSeq = 0;
 
-  function readyLinks() {
-    return links.filter((l) => l.ready);
-  }
+  const readyLinks = () => links.filter((l) => l.ready);
 
   function publish(topic, payload, opts) {
     let sent = false;
@@ -1057,27 +1382,42 @@
   let lastCursorSend = 0;
   function sendCursor(sx, sy) {
     const now = performance.now();
-    if (!connected || now - lastCursorSend < 100) return;
+    if (!connected || now - lastCursorSend < 110) return;
+    const m = screenToMap(sx, sy);
+    if (!m) return;
     lastCursorSend = now;
-    const w = screenToWorld(sx, sy);
-    sendLive({ t: 'cursor', x: r1(w.x), y: r1(w.y), c: state.color === 'rainbow' ? '#f43f5e' : state.color });
+    sendLive({ t: 'cursor', x: Math.round(m.x), y: Math.round(m.y), c: state.color === 'rainbow' ? '#f43f5e' : state.color });
   }
 
-  function sendHello() {
-    sendLive({ t: 'hello' });
+  function rec(key) {
+    let r = store.get(key);
+    if (!r) {
+      r = { dead: new Set(), deadList: [], min: 0, pubTimer: null, lastPub: 0, lastPayload: '' };
+      store.set(key, r);
+    }
+    return r;
+  }
+  function tombstone(r, id) {
+    if (r.dead.has(id)) return;
+    r.dead.add(id);
+    r.deadList.push(id);
+    while (r.deadList.length > DEAD_CAP) r.dead.delete(r.deadList.shift());
   }
 
   function undo() {
     if (drawing) endStroke();
     while (mine.length) {
       const id = mine.pop();
-      if (strokes.has(id)) {
-        deleteStroke(id);
-        sendLive({ t: 'remove', id });
-        return;
-      }
+      const s = strokes.get(id);
+      if (!s) continue;
+      const key = s.cell;
+      tombstone(rec(key), id);
+      removeStroke(id);
+      schedulePublish(key);
+      sendLive({ t: 'remove', id });
+      return;
     }
-    showBanner('Nothing of yours to undo');
+    banner('Nothing of yours to undo');
   }
 
   function packPoints(p) {
@@ -1100,12 +1440,12 @@
     for (let i = 0; i + 1 < d.length; i += 2) {
       x += d[i];
       y += d[i + 1];
-      out.push(clamp(x / 10, 0, WORLD), clamp(y / 10, 0, WORLD));
+      out.push(x / 10, clamp(y / 10, 0, MH));
     }
     return out;
   }
   function packStroke(s) {
-    const o = { i: s.id, c: s.color, w: s.size, t: s.t, p: packPoints(s.points) };
+    const o = { i: s.id, c: s.color, w: Math.round(s.size * 10) / 10, t: s.t, p: packPoints(s.points) };
     if (s.erase) o.e = 1;
     if (s.k) o.k = s.k;
     return o;
@@ -1113,139 +1453,61 @@
   const COLOR_RE = /^#[0-9a-f]{6}$/i;
   function unpackStroke(o) {
     if (!o || typeof o.i !== 'string' || o.i.length > 40 || !Array.isArray(o.p)) return null;
-    const points = unpackPoints(o.p.filter((v) => typeof v === 'number' && Number.isFinite(v)));
-    if (points.length < 2 || points.length > MAX_POINTS * 2) return null;
-    const s = {
+    const pts = unpackPoints(o.p.filter((v) => typeof v === 'number' && Number.isFinite(v)));
+    if (pts.length < 2 || pts.length > MAX_POINTS * 2) return null;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (let i = 0; i < pts.length; i += 2) {
+      if (pts[i] < minX) minX = pts[i];
+      if (pts[i] > maxX) maxX = pts[i];
+    }
+    const cs = Math.max(0.05, Math.cos(yToLat(clamp(pts[1], 0, MH))));
+    if ((maxX - minX) * cs > MAX_SPAN * 2.4) return null;
+    const shift = Math.floor(pts[0] / MW) * MW;
+    if (shift) for (let i = 0; i < pts.length; i += 2) pts[i] -= shift;
+    return {
       id: o.i,
-      color: o.c === 'rainbow' ? 'rainbow' : COLOR_RE.test(o.c) ? o.c.toLowerCase() : '#1a1a1a',
-      size: clamp(Number(o.w) || 5, 1, 64),
+      color: o.c === 'rainbow' ? 'rainbow' : COLOR_RE.test(o.c) ? o.c.toLowerCase() : '#111318',
+      size: clamp(Number(o.w) || 20, 1, 24000),
       erase: !!o.e,
+      k: o.k === 's' ? 's' : undefined,
       t: Number(o.t) || 0,
-      points,
+      points: pts,
     };
-    if (o.k === 's') s.k = 's';
-    s.region = regionAt(points[0], points[1]);
-    return s;
   }
-
-  function wantStorage(tl, br) {
-    const margin = STILE;
-    const x0 = clamp(Math.floor((tl.x - margin) / STILE), 0, SN - 1);
-    const x1 = clamp(Math.floor((br.x + margin) / STILE), 0, SN - 1);
-    const y0 = clamp(Math.floor((tl.y - margin) / STILE), 0, SN - 1);
-    const y1 = clamp(Math.floor((br.y + margin) / STILE), 0, SN - 1);
-    const now = performance.now();
-    const fresh = [];
-    const want = (x, y) => {
-      const key = `${x}_${y}`;
-      if (!subscribed.has(key)) fresh.push(key);
-      subscribed.set(key, now);
-    };
-    const perRegion = REGION / STILE;
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        want(x, y);
-        // In a Kaleidoscope region a stroke drawn anywhere shows up in eight places,
-        // so also follow the tiles that mirror onto this one.
-        if (regionAt(x * STILE, y * STILE).fx === 'mirror') {
-          const bx = Math.floor(x / perRegion) * perRegion;
-          const by = Math.floor(y / perRegion) * perRegion;
-          let lx = x - bx;
-          let ly = y - by;
-          for (let k = 0; k < 4; k++) {
-            want(bx + lx, by + ly);
-            want(bx + (perRegion - 1 - lx), by + ly);
-            const nx = perRegion - 1 - ly;
-            ly = lx;
-            lx = nx;
-          }
-        }
-      }
-    }
-    if (fresh.length) subscribeTopics(fresh.map(TILE_TOPIC));
-  }
-  function refreshSubscriptions() {
-    wantStorage(screenToWorld(0, 0), screenToWorld(W, H));
-  }
-  function subscribeTopics(topics) {
-    for (const l of readyLinks()) {
-      try {
-        l.client.subscribe(topics, { qos: 0 });
-      } catch {
-        /* retried on reconnect */
-      }
-    }
-  }
-
-  setInterval(() => {
-    refreshSubscriptions();
-    const now = performance.now();
-    const stale = [];
-    for (const [key, t] of subscribed) {
-      if (now - t > 20000) {
-        stale.push(key);
-        subscribed.delete(key);
-      }
-    }
-    if (stale.length) {
-      for (const l of readyLinks()) {
-        try {
-          l.client.unsubscribe(stale.map(TILE_TOPIC));
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-  }, 5000);
-
-  // The Tides: expire old strokes, and keep fading tiles fresh.
-  setInterval(() => {
-    for (const s of [...strokes.values()]) {
-      if (isExpired(s)) {
-        removeStroke(s.id);
-        for (const k of s.stiles) if (subscribed.has(k)) schedulePublish(k);
-      }
-    }
-    for (const bm of bitmaps.values()) {
-      if (regionAt(bm.tx * TILE, bm.ty * TILE).fx === 'tides') bm.dirty = true;
-    }
-    requestRender();
-  }, 60000);
 
   function schedulePublish(key) {
-    const rec = tileRec(key);
-    if (rec.pubTimer) return;
-    const wait = Math.max(400, 1500 - (performance.now() - rec.lastPub));
-    rec.pubTimer = setTimeout(() => {
-      rec.pubTimer = null;
-      publishTile(key);
+    const r = rec(key);
+    if (r.pubTimer) return;
+    const wait = Math.max(500, 1800 - (performance.now() - r.lastPub));
+    r.pubTimer = setTimeout(() => {
+      r.pubTimer = null;
+      publishCell(key);
     }, wait);
   }
 
-  function publishTile(key) {
-    const rec = tileRec(key);
-    let list = [...rec.ids].map((id) => strokes.get(id)).filter(Boolean);
+  function publishCell(key) {
+    const r = rec(key);
+    const set = cellIds.get(key);
+    let list = set ? [...set].map((id) => strokes.get(id)).filter(Boolean) : [];
     list.sort((a, b) => a.t - b.t);
-    let body = { v: 1, m: rec.min, d: rec.deadList.slice(-DEAD_CAP), s: list.map(packStroke) };
+    let body = { v: 1, m: r.min, d: r.deadList.slice(-DEAD_CAP), s: list.map(packStroke) };
     let payload = JSON.stringify(body);
     while (payload.length > TILE_BYTES_CAP && list.length > 1) {
       const dropped = list.splice(0, Math.max(1, Math.floor(list.length * 0.15)));
-      rec.min = list[0].t;
+      r.min = list[0].t;
       for (const s of dropped) removeStroke(s.id);
-      body = { v: 1, m: rec.min, d: rec.deadList.slice(-DEAD_CAP), s: list.map(packStroke) };
+      body = { v: 1, m: r.min, d: r.deadList.slice(-DEAD_CAP), s: list.map(packStroke) };
       payload = JSON.stringify(body);
     }
-    rec.lastPub = performance.now();
-    rec.lastPayload = payload;
-    if (!publish(TILE_TOPIC(key), payload, { qos: 1, retain: true })) {
-      setTimeout(() => schedulePublish(key), 3000);
-    }
+    r.lastPub = performance.now();
+    r.lastPayload = payload;
+    if (!publish(TILE_TOPIC(key), payload, { qos: 1, retain: true })) setTimeout(() => schedulePublish(key), 4000);
   }
 
-  function mergeTile(key, payload) {
-    const rec = tileRec(key);
-    if (!payload) return;
-    if (payload === rec.lastPayload) return;
+  function mergeCell(key, payload) {
+    const r = rec(key);
+    if (!payload || payload === r.lastPayload) return;
     let body;
     try {
       body = JSON.parse(payload);
@@ -1253,13 +1515,13 @@
       return;
     }
     if (!body || !Array.isArray(body.s)) return;
-    rec.lastPayload = payload;
-    let needPublish = false;
-    if (typeof body.m === 'number' && body.m > rec.min) rec.min = body.m;
+    r.lastPayload = payload;
+    let republish = false;
+    if (typeof body.m === 'number' && body.m > r.min) r.min = body.m;
     if (Array.isArray(body.d)) {
       for (const id of body.d) {
         if (typeof id !== 'string') continue;
-        if (!rec.dead.has(id)) tombstone(rec, id);
+        if (!r.dead.has(id)) tombstone(r, id);
         if (strokes.has(id)) removeStroke(id);
       }
     }
@@ -1267,29 +1529,27 @@
     for (const o of body.s) {
       const s = unpackStroke(o);
       if (!s) continue;
-      if (rec.dead.has(s.id)) {
-        needPublish = true;
+      if (r.dead.has(s.id) || s.t < r.min) {
+        republish = true;
         continue;
       }
-      if (s.t < rec.min || isExpired(s)) continue;
       seen.add(s.id);
       if (!strokes.has(s.id)) commitStroke(s);
-      rec.ids.add(s.id);
     }
-    for (const id of [...rec.ids]) {
-      if (seen.has(id)) continue;
-      const s = strokes.get(id);
-      if (!s) {
-        rec.ids.delete(id);
-        continue;
+    const set = cellIds.get(key);
+    if (set) {
+      for (const id of [...set]) {
+        if (seen.has(id)) continue;
+        const s = strokes.get(id);
+        if (!s) {
+          set.delete(id);
+          continue;
+        }
+        if (s.t < r.min) removeStroke(id);
+        else republish = true;
       }
-      if (s.t < rec.min) {
-        removeStroke(id);
-        continue;
-      }
-      needPublish = true;
     }
-    if (needPublish) schedulePublish(key);
+    if (republish) schedulePublish(key);
   }
 
   function onLive(payload) {
@@ -1300,17 +1560,19 @@
       return;
     }
     if (!m || typeof m.u !== 'string' || m.u === myId) return;
-    const dedupe = `${m.u}:${m.n}`;
-    if (seenLive.has(dedupe)) return;
-    seenLive.add(dedupe);
-    seenLiveList.push(dedupe);
+    const key = `${m.u}:${m.n}`;
+    if (seenLive.has(key)) return;
+    seenLive.add(key);
+    seenLiveList.push(key);
     while (seenLiveList.length > 4000) seenLive.delete(seenLiveList.shift());
     users.set(m.u, performance.now());
     switch (m.t) {
       case 'start': {
         const s = unpackStroke({ i: m.id, c: m.c, w: m.w, e: m.e, k: m.k, t: Date.now(), p: packPoints(Array.isArray(m.p) ? m.p.slice(0, 2) : []) });
         if (!s || !s.id.startsWith(`${m.u}-`)) return;
+        s.in = new Set();
         activeStrokes.set(s.id, s);
+        liveDrawSegment(s, s.points);
         requestRender();
         break;
       }
@@ -1320,9 +1582,11 @@
         for (let i = 0; i + 1 < m.p.length; i += 2) {
           const x = m.p[i];
           const y = m.p[i + 1];
-          if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y)) {
-            s.points.push(clamp(x, 0, WORLD), clamp(y, 0, WORLD));
-          }
+          if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+          const seg = [s.points[s.points.length - 2], s.points[s.points.length - 1], x, clamp(y, 0, MH)];
+          s.points.push(x, clamp(y, 0, MH));
+          s.bb = null;
+          liveDrawSegment(s, seg);
         }
         requestRender();
         break;
@@ -1330,23 +1594,25 @@
       case 'end': {
         const s = unpackStroke(m.s);
         if (!s || !s.id.startsWith(`${m.u}-`)) return;
+        const old = activeStrokes.get(s.id);
         activeStrokes.delete(s.id);
+        if (old) s.in = old.in;
         commitStroke(s);
         break;
       }
       case 'remove':
         if (typeof m.id === 'string' && m.id.startsWith(`${m.u}-`)) {
-          activeStrokes.delete(m.id);
           const s = strokes.get(m.id);
+          activeStrokes.delete(m.id);
           if (s) {
-            for (const k of s.stiles) tombstone(tileRec(k), m.id);
+            tombstone(rec(s.cell), m.id);
             removeStroke(m.id);
           }
         }
         break;
       case 'cursor':
         if (typeof m.x === 'number' && typeof m.y === 'number') {
-          cursors.set(m.u, { x: m.x, y: m.y, c: COLOR_RE.test(m.c) ? m.c : '#1a1a1a', t: performance.now() });
+          cursors.set(m.u, { x: m.x, y: m.y, c: COLOR_RE.test(m.c) ? m.c : '#111318', t: performance.now() });
           requestRender();
         }
         break;
@@ -1358,23 +1624,20 @@
 
   function onMessage(topic, buf) {
     const payload = buf.toString();
-    if (topic === LIVE_TOPIC) {
-      onLive(payload);
-      return;
-    }
-    if (topic.startsWith(`${ROOT}/tile/`)) mergeTile(topic.slice(ROOT.length + 6), payload);
+    if (topic === LIVE_TOPIC) onLive(payload);
+    else if (topic.startsWith(`${ROOT}/tile/`)) mergeCell(topic.slice(ROOT.length + 6), payload);
   }
 
   function connect() {
     if (typeof mqtt === 'undefined') {
-      setStatus('Offline: library failed to load', 'off');
+      setStatus('Offline', 'off');
       return;
     }
     for (const l of links) {
       let client;
       try {
         client = mqtt.connect(l.url, {
-          connectTimeout: 8000,
+          connectTimeout: 9000,
           reconnectPeriod: 5000,
           keepalive: 30,
           clean: true,
@@ -1387,12 +1650,12 @@
       client.on('connect', () => {
         l.ready = true;
         try {
-          client.subscribe([LIVE_TOPIC, ...[...subscribed.keys()].map(TILE_TOPIC)], { qos: 0 });
+          client.subscribe([LIVE_TOPIC, `${ROOT}/tile/+`], { qos: 0 });
         } catch {
-          /* ignore */
+          /* retried on reconnect */
         }
         updateConnection();
-        sendHello();
+        sendLive({ t: 'hello' });
       });
       client.on('message', onMessage);
       client.on('close', () => {
@@ -1405,7 +1668,7 @@
 
   function updateConnection() {
     connected = readyLinks().length > 0;
-    setStatus(connected ? 'Live' : 'Reconnecting…', connected ? 'live' : 'off');
+    setStatus(connected ? 'Live' : 'Reconnecting', connected ? 'live' : 'off');
     updateUsers();
   }
   function updateUsers() {
@@ -1415,76 +1678,74 @@
       if (now - t > 45000) users.delete(id);
       else n++;
     }
-    setUsers(n);
+    usersEl.textContent = String(n);
   }
   setInterval(() => {
-    if (connected) sendHello();
+    if (connected) sendLive({ t: 'hello' });
     updateUsers();
   }, 15000);
 
-  window.__pixelCanvas = {
-    get strokes() { return strokes.size; },
-    get brokers() { return readyLinks().map((l) => l.url); },
-    get id() { return myId; },
-    get subscribed() { return subscribed.size; },
-    get region() { return regionAt(cam.x, cam.y); },
-    get queue() { return renderQueue.size; },
-    get bitmaps() { return bitmaps.size; },
-    get lastError() { return lastError && String(lastError.stack || lastError); },
-    get frameNo() { return frameNo; },
-    get pending() { return renderPending; },
-    strokeInfo: (id) => { const s = strokes.get(id); return s && { tiles: s.tiles, stiles: s.stiles, bitmaps: s.tiles.map((k) => { const b = bitmaps.get(k); return b ? `${k}:res${b.res}:${b.dirty ? 'dirty' : 'ok'}` : `${k}:none`; }), fx: s.region.fx }; },
-    lastStroke: () => order[order.length - 1],
-    regions: REGIONS,
-    cam,
-    teleport: (rx, ry) => teleport(REGIONS[ry * RN + rx]),
-  };
-
-  // ------------------------------------------------------------ ui
-  const help = $('#help');
-  const map = $('#map');
-  const zoomLabel = $('#zoomLabel');
+  // ============================================================== ui
+  const $ = (s) => document.querySelector(s);
+  const placeName = $('#placeName');
+  const placeSub = $('#placeSub');
   const statusDot = $('#statusDot');
   const statusText = $('#statusText');
   const usersEl = $('#users');
+  const kmLabel = $('#kmLabel');
   const colorPicker = $('#colorPicker');
   const customColor = $('.custom-color');
-  const regionName = $('#regionName');
-  const regionFx = $('#regionFx');
-  const banner = document.createElement('div');
-  banner.id = 'banner';
-  document.body.appendChild(banner);
+  const help = $('#help');
+  const places = $('#places');
+  const bannerEl = $('#banner');
   let bannerTimer = null;
 
-  function showBanner(text) {
-    banner.textContent = text;
-    banner.classList.add('show');
+  function banner(text) {
+    bannerEl.textContent = text;
+    bannerEl.classList.add('show');
     clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(() => banner.classList.remove('show'), 2200);
+    bannerTimer = setTimeout(() => bannerEl.classList.remove('show'), 2200);
+  }
+  let lastHint = 0;
+  function hintZoom() {
+    const now = performance.now();
+    if (now - lastHint < 2500) return;
+    lastHint = now;
+    banner('Too far out to draw. Zoom in closer to the surface.');
   }
   function setStatus(text, cls) {
     statusText.textContent = text;
     statusDot.className = `dot ${cls}`;
   }
-  function setUsers(n) {
-    usersEl.textContent = String(n);
+  function hidePanels() {
+    help.classList.add('hidden');
+    places.classList.add('hidden');
   }
 
-  let pillRegion = null;
-  function updateRegionPill() {
-    const reg = regionAt(cam.x, cam.y);
-    if (reg === pillRegion) return;
-    pillRegion = reg;
-    regionName.textContent = reg.name;
-    regionFx.textContent = `${reg.label} · ${reg.desc}`;
-    for (const cell of mapGrid.children) cell.classList.toggle('here', cell.dataset.i === String(REGIONS.indexOf(reg)));
+  let lastPlace = '';
+  let lastCan = null;
+  function updateHud() {
+    const km = viewKm();
+    kmLabel.textContent = km >= 1000 ? `${Math.round(km / 100) / 10}k km` : `${Math.round(km)} km`;
+    const p = placeAt(lonToX(cam.lon), latToY(cam.lat));
+    if (p !== lastPlace) {
+      lastPlace = p;
+      placeName.textContent = p;
+    }
+    const cd = canDraw();
+    if (cd !== lastCan) {
+      lastCan = cd;
+      placeSub.textContent = cd ? 'Close enough to draw' : 'Zoom in to draw here';
+      document.body.classList.toggle('nodraw', !cd);
+    }
   }
 
   function setTool(tool) {
     state.tool = tool;
     document.querySelectorAll('#tools .tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
-    canvas.classList.toggle('tool-hand', tool === 'hand');
-    canvas.classList.toggle('tool-eraser', tool === 'eraser');
+    glCanvas.classList.toggle('tool-hand', tool === 'hand');
+    glCanvas.classList.toggle('tool-eraser', tool === 'eraser');
+    if (tool !== 'hand' && !canDraw()) hintZoom();
   }
   function setColor(color, fromPicker) {
     state.color = color;
@@ -1493,16 +1754,63 @@
     if (fromPicker) colorPicker.value = color;
     if (state.tool === 'eraser' || state.tool === 'hand') setTool('pen');
   }
-  function setSize(size) {
-    state.size = size;
-    document.querySelectorAll('.size').forEach((b) => b.classList.toggle('active', Number(b.dataset.size) === size));
+  function setSize(i) {
+    state.sizeIdx = clamp(i, 0, SIZE_PX.length - 1);
+    document.querySelectorAll('.size').forEach((b, n) => b.classList.toggle('active', n === state.sizeIdx));
   }
-  function stepSize(dir) {
-    setSize(SIZES[clamp(SIZES.indexOf(state.size) + dir, 0, SIZES.length - 1)]);
+
+  function travelTo(place) {
+    cam.lon = place.lon * DEG;
+    cam.lat = place.lat * DEG;
+    setZoom(Math.max(Rdraw() * 1.15, Rcover() * 6));
+    banner(place.name);
+    hidePanels();
   }
+
+  // Places panel: a flat map of the planet you can click to travel.
+  const mini = $('#mini');
+  const miniCtx = mini.getContext('2d');
+  function paintMini() {
+    mini.width = 640;
+    mini.height = 320;
+    miniCtx.drawImage(overview.comp, 0, 0, mini.width, mini.height);
+    miniCtx.font = '600 9px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    miniCtx.textAlign = 'center';
+    for (const pl of PLACES) {
+      const x = (lonToX(pl.lon * DEG) / MW) * mini.width;
+      const y = (latToY(pl.lat * DEG) / MH) * mini.height;
+      miniCtx.fillStyle = 'rgba(255,255,255,0.85)';
+      miniCtx.strokeStyle = 'rgba(0,0,0,0.5)';
+      miniCtx.lineWidth = 2.5;
+      miniCtx.strokeText(pl.name, x, y);
+      miniCtx.fillText(pl.name, x, y);
+    }
+    const cx = (lonToX(cam.lon) / MW) * mini.width;
+    const cy = (latToY(cam.lat) / MH) * mini.height;
+    miniCtx.strokeStyle = '#f43f5e';
+    miniCtx.lineWidth = 2;
+    miniCtx.beginPath();
+    miniCtx.arc(cx, cy, 6, 0, TAU);
+    miniCtx.stroke();
+  }
+  function togglePlaces() {
+    const show = places.classList.contains('hidden');
+    hidePanels();
+    if (!show) return;
+    places.classList.remove('hidden');
+    if (overview.valid) {
+      compositeRect(overview, 0, 0, overview.cw, overview.ch);
+      paintMini();
+    }
+  }
+  mini.addEventListener('click', (e) => {
+    const r = mini.getBoundingClientRect();
+    const lon = xToLon(((e.clientX - r.left) / r.width) * MW);
+    const lat = yToLat(((e.clientY - r.top) / r.height) * MH);
+    travelTo({ name: placeAt(lonToX(lon), latToY(lat)), lon: lon / DEG, lat: lat / DEG });
+  });
 
   document.querySelectorAll('#tools .tool').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
-
   const colorsEl = $('#colors');
   for (const color of PALETTE) {
     const b = document.createElement('button');
@@ -1515,90 +1823,73 @@
     colorsEl.appendChild(b);
   }
   colorPicker.addEventListener('input', () => setColor(colorPicker.value, true));
-
   const sizesEl = $('#sizes');
-  for (const size of SIZES) {
+  SIZE_PX.forEach((px, i) => {
     const b = document.createElement('button');
     b.className = 'size';
-    b.dataset.size = String(size);
-    b.title = `Size ${size}`;
-    b.setAttribute('aria-label', `Size ${size}`);
+    b.title = `Brush ${px}`;
+    b.setAttribute('aria-label', b.title);
     const dot = document.createElement('span');
     dot.className = 'dot';
-    const px = clamp(3 + size * 0.5, 4, 24);
-    dot.style.width = `${px}px`;
-    dot.style.height = `${px}px`;
+    const d = clamp(3 + px * 0.42, 4, 24);
+    dot.style.width = `${d}px`;
+    dot.style.height = `${d}px`;
     b.appendChild(dot);
-    b.addEventListener('click', () => setSize(size));
+    b.addEventListener('click', () => setSize(i));
     sizesEl.appendChild(b);
-  }
-
-  // World map
-  const mapGrid = $('#mapGrid');
-  const mapCaption = $('#mapCaption');
-  REGIONS.forEach((reg, i) => {
-    const cell = document.createElement('button');
-    cell.className = 'cell';
-    cell.dataset.i = String(i);
-    cell.style.background = reg.bg;
-    cell.title = `${reg.name} · ${reg.label}`;
-    cell.setAttribute('aria-label', cell.title);
-    cell.addEventListener('mouseenter', () => {
-      mapCaption.textContent = `${reg.name} · ${reg.label}: ${reg.desc}`;
-    });
-    cell.addEventListener('click', () => {
-      map.classList.add('hidden');
-      teleport(reg);
-    });
-    mapGrid.appendChild(cell);
   });
-  const legend = $('#mapLegend');
-  for (const [key, fx] of Object.entries(FX)) {
-    const span = document.createElement('span');
-    const sw = document.createElement('i');
-    sw.style.background = fx.bg;
-    span.appendChild(sw);
-    span.appendChild(document.createTextNode(fx.label));
-    span.title = fx.desc;
-    span.dataset.fx = key;
-    legend.appendChild(span);
-  }
-  function toggleMap() {
-    map.classList.toggle('hidden');
-    help.classList.add('hidden');
-    if (!map.classList.contains('hidden')) mapCaption.textContent = '256 regions. Click one to teleport.';
-  }
-  function randomTeleport() {
-    const here = regionAt(cam.x, cam.y);
-    let reg = here;
-    while (reg === here) reg = REGIONS[Math.floor(Math.random() * REGIONS.length)];
-    teleport(reg);
-  }
 
   $('#undoBtn').addEventListener('click', undo);
-  $('#zoomIn').addEventListener('click', () => zoomAt(W / 2, H / 2, 1.25));
-  $('#zoomOut').addEventListener('click', () => zoomAt(W / 2, H / 2, 0.8));
-  zoomLabel.addEventListener('click', () => setZoom(1));
-  $('#fitBtn').addEventListener('click', () => teleport(regionAt(cam.x, cam.y)));
-  $('#mapBtn').addEventListener('click', toggleMap);
-  $('#mapClose').addEventListener('click', () => map.classList.add('hidden'));
-  $('#regionPill').addEventListener('click', toggleMap);
-  $('#randomBtn').addEventListener('click', randomTeleport);
+  $('#zoomIn').addEventListener('click', () => setZoom(cam.R * 1.5));
+  $('#zoomOut').addEventListener('click', () => setZoom(cam.R / 1.5));
+  $('#fitBtn').addEventListener('click', () => setZoom(Rmin()));
+  $('#placesBtn').addEventListener('click', togglePlaces);
+  $('#placePill').addEventListener('click', togglePlaces);
+  $('#randomBtn').addEventListener('click', () => travelTo(PLACES[Math.floor(Math.random() * PLACES.length)]));
+  $('#placesClose').addEventListener('click', hidePanels);
   $('#helpBtn').addEventListener('click', () => {
-    help.classList.toggle('hidden');
-    map.classList.add('hidden');
+    const show = help.classList.contains('hidden');
+    hidePanels();
+    if (show) help.classList.remove('hidden');
   });
-  $('#helpClose').addEventListener('click', () => help.classList.add('hidden'));
+  $('#helpClose').addEventListener('click', hidePanels);
 
-  // ------------------------------------------------------------ boot
+  // ============================================================== boot
+  let lastHash = '';
+  let lastHashAt = 0;
+  function updateHash() {
+    const h = `#${(cam.lon / DEG).toFixed(2)},${(cam.lat / DEG).toFixed(2)},${(cam.R / Rcover()).toFixed(3)}`;
+    const now = performance.now();
+    if (h === lastHash || now - lastHashAt < 600) return;
+    lastHash = h;
+    lastHashAt = now;
+    history.replaceState(null, '', h);
+  }
+  function readHash() {
+    const m = /^#(-?[\d.]+),(-?[\d.]+),([\d.]+)$/.exec(location.hash);
+    if (!m) return;
+    const lon = Number(m[1]) * DEG;
+    const lat = Number(m[2]) * DEG;
+    const z = Number(m[3]);
+    if (![lon, lat, z].every(Number.isFinite)) return;
+    cam.lon = wrapPi(lon);
+    cam.lat = clamp(lat, -PI / 2, PI / 2);
+    cam.R = clamp(z * Rcover(), Rmin(), Rmax());
+  }
+
   function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 3);
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth;
     H = window.innerHeight;
-    canvas.width = Math.round(W * dpr);
-    canvas.height = Math.round(H * dpr);
-    canvas.style.width = `${W}px`;
-    canvas.style.height = `${H}px`;
+    for (const c of [stars, glCanvas, overlay]) {
+      c.width = Math.round(W * dpr);
+      c.height = Math.round(H * dpr);
+      c.style.width = `${W}px`;
+      c.style.height = `${H}px`;
+    }
+    paintStars();
+    cam.R = clamp(cam.R, Rmin(), Rmax());
+    detail.valid = false;
     requestRender();
   }
   window.addEventListener('resize', resize);
@@ -1607,20 +1898,41 @@
     requestRender();
   });
 
+  window.__pixelCanvas = {
+    get strokes() { return strokes.size; },
+    get brokers() { return readyLinks().map((l) => l.url); },
+    get place() { return placeAt(lonToX(cam.lon), latToY(cam.lat)); },
+    get canDraw() { return canDraw(); },
+    get km() { return viewKm(); },
+    get lastError() { return lastError && String(lastError.stack || lastError); },
+    get gl() { return !glFail; },
+    get view() { return curView === overview ? 'overview' : 'detail'; },
+    cam,
+    forceFrame: frame,
+    places: PLACES,
+    travelTo,
+    setZoom,
+    project,
+    unproject,
+  };
+
+  initGL();
+  if (glFail) document.getElementById('nogl').classList.remove('hidden');
   setTool('pen');
   setColor(PALETTE[0], false);
-  setSize(SIZES[1]);
-  readHash();
+  setSize(1);
+  cam.R = 0;
   resize();
-  refreshSubscriptions();
-  updateRegionPill();
+  cam.R = Rmin();
+  readHash();
+  requestRender();
   connect();
   try {
-    if (!localStorage.getItem('pxc-seen')) {
-      localStorage.setItem('pxc-seen', '1');
+    if (!localStorage.getItem('pxc3-seen')) {
+      localStorage.setItem('pxc3-seen', '1');
       help.classList.remove('hidden');
     }
   } catch {
-    /* private mode: no first-visit help */
+    /* private mode */
   }
 })();

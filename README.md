@@ -1,43 +1,37 @@
 # Pixel Canvas
 
-A gigantic shared canvas. Anyone with the link can open it and draw on the same board at the same time, and everyone sees each other's strokes live. Drawings stay on the canvas for everyone who comes later.
-
-The canvas is 262,144 × 262,144 units, split into 256 named regions, and every region changes how drawing works.
+A shared planet. Anyone with the link can spin it, drop down to the surface and draw on it, and everyone sees each other's marks live. Whatever gets drawn stays on the planet.
 
 ## Play
 
 **https://silasedel.github.io/pixel-canvas/** — that's it. Works on any phone or computer, nothing to install, no sign-up.
 
-- 256 regions with their own rules: The Void (everything glows on black), Kaleidoscope (every stroke mirrored eight ways), Pixel Land (chunky grid), Rainbow Reach, The Tides (drawings wash away after an hour), Giant Country, Tiny Town, Wobble Woods, Sketchbook, Blueprint, Negative Zone, Drip City, Echo Chamber, Glitch Grid, Chalkboard, and plain Open Canvas
-- World map (M) to teleport anywhere, R for a random region, F to see the whole region you are in
-- Pen, spray can, eraser, 12 preset colors plus rainbow ink and a custom color picker, five thicknesses
-- Live cursors and an online counter so you can see who else is around
-- Undo your own last stroke (Ctrl / ⌘ + Z)
-- Share the URL to bring people to the exact spot you are looking at (the position is stored in the hash)
-- Works with mouse, trackpad, touch (pinch to zoom) and pen input
+- A whole globe you can spin and zoom, about 40,000 km around, with continents, oceans, ice caps, biomes and a graticule
+- Named places: eleven continents and nine seas, each generated the same way for everyone
+- **You can only draw close to the surface**, under about 1,200 km across. Zoomed out you can look but not touch, so nobody can scribble a line across a continent
+- Pen, spray can, eraser, twelve colors plus rainbow ink and a custom picker, five brush sizes, and undo
+- Live cursors, an online counter, and a flat map (M) you can click to travel anywhere
+- The URL carries where you are looking, so sharing it drops people on the same spot
 
 ## Controls
 
 | Action | How |
 | --- | --- |
-| Draw | Click or touch and drag. P pen, S spray can, E eraser |
-| Pan | Scroll, hand tool (H), hold Space and drag, or middle / right drag |
-| Zoom | Ctrl / ⌘ + scroll, pinch, or the + / − keys. 0 resets to 100%, F fits the region |
-| Travel | M opens the world map, R teleports somewhere random |
-| Tools | P pen, E eraser, `[` and `]` change thickness |
+| Spin | Drag the planet, or the arrow keys |
+| Zoom | Scroll, pinch, or the + and − keys. 0 pulls back to the whole planet |
+| Draw | Only near the surface. P pen, S spray can, E eraser, `[` and `]` change size |
+| Travel | M opens the flat map, R drops you somewhere random |
 | Undo | Ctrl / ⌘ + Z removes your last stroke |
 
 ## How it works
 
 There is no server of its own. The site is three static files on GitHub Pages, and all the multiplayer goes through public MQTT brokers over WebSockets (EMQX, HiveMQ and Mosquitto's test broker), the same approach as [Pinpoint](https://github.com/silasedel/pinpoint).
 
-- **Live drawing** is streamed on one topic (`pixelcanvas/v2/live`) as `start`, `move` and `end` messages, plus cursor positions and a heartbeat for the online count. Every message goes to all three brokers and is de-duplicated on arrival, so the board works as long as any one of them is up.
-- **Persistence** uses retained messages. The canvas is split into 256 × 256 storage tiles of 1024 units, and each tile is one retained message (`pixelcanvas/v2/tile/<x>_<y>`) holding the strokes that start in it. A client only subscribes to the tiles it is looking at (plus their mirror images in Kaleidoscope regions), so the download stays small no matter how big the canvas gets. When you finish a stroke your browser republishes its tile.
-- **Regions** are deterministic: names and effects come from a seeded hash of the region coordinates, so every client agrees without any shared config. Effects are applied at render time from the stroke's first point, so the stored data is the same plain vector stroke everywhere.
-- **Conflicts** are resolved by merging: every client that receives a tile compares it with what it knows and republishes the union if the brokers are missing something. Undo writes a tombstone so a removed stroke does not come back. Each tile is capped at about 150 KB; past that the oldest strokes in that tile are forgotten.
-- **Rendering** splits the world into 512-unit tiles that are rasterized to offscreen bitmaps at the current zoom level, so panning is cheap and lines stay crisp when you zoom in. Strokes in progress are drawn on top as vectors.
-
-Strokes are vector data: `{ id, color, size, erase, t, points }` with points delta-encoded in tenths of a unit.
+- **The planet** is generated from a fixed seed: continents are unions of wobbly spherical blobs, so coastlines are real polygons that stay crisp at any zoom and every client draws an identical world without downloading a map.
+- **The globe** is drawn in WebGL. A sphere mesh is projected orthographically in the vertex shader, and the fragment shader samples an equirectangular texture. Two textures are kept: one of the whole world, updated as strokes arrive, and one covering just the patch you are looking at, rebuilt when you move. That is what keeps a planet-sized canvas sharp when you are 50 km above it.
+- **Strokes** are vector data in map units, stored as `{ id, color, size, erase, t, points }` with points delta-encoded. Because the projection stretches longitude, the brush is widened by `1 / cos(latitude)` when painting, so a round pen stays round once it is on the sphere.
+- **Live drawing** streams on one topic (`pixelcanvas/v3/live`) as `start`, `move` and `end` messages, plus cursors and a heartbeat. Every message goes to all three brokers and is de-duplicated on arrival, so the world works as long as any one broker is up.
+- **Persistence** uses retained messages. The planet is split into a 16 × 8 grid of storage cells, each one retained message (`pixelcanvas/v3/tile/<x>_<y>`). Clients subscribe to all of them, so you always see the whole world from orbit. Finishing a stroke republishes its cell; every client merges what it receives with what it knows and republishes the union, and undo writes a tombstone so a removed stroke does not come back. Each cell is capped at about 90 KB; past that the oldest strokes in that cell are forgotten.
 
 ## Run it locally
 
@@ -47,7 +41,7 @@ Any static file server works, for example:
 python3 -m http.server 3000
 ```
 
-Then open http://localhost:3000. Open it in a second window to see the live sync.
+Then open http://localhost:3000. Open a second window to see the live sync.
 
 ## License
 
